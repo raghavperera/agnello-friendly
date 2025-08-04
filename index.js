@@ -171,6 +171,7 @@ async function runHostFriendly(channel, hostMember) {
       for (const uid of claimedMap.values()) {
         try {
           const u = await client.users.fetch(uid);
+          await u.send(`<@${uid}>`);
           await u.send(`Here’s the friendly, join up: ${link}`);
         } catch {
           console.error('❌ Failed to DM', uid);
@@ -222,6 +223,7 @@ client.on('messageCreate', async msg => {
 
     for (const member of role.members.values()) {
       try {
+        await member.send(`<@${member.id}>`);
         await member.send(messageToSend);
       } catch {
         failed.push(member.user.tag);
