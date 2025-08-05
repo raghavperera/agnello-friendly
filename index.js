@@ -2,7 +2,8 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
-  PermissionsBitField
+  PermissionsBitField,
+  EmbedBuilder
 } from 'discord.js';
 import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs/voice';
 import express from 'express';
@@ -12,58 +13,39 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildVoiceStates
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
 const app = express();
-app.get('/', (_, res) => res.send('Bot is alive!'));
-app.listen(3000, () => console.log('Server running'));
+const port = process.env.PORT || 3000;
 
-const wait = ms => new Promise(res => setTimeout(res, ms));
-const token = process.env.DISCORD_TOKEN;
+app.get('/', (_, res) => {
+  res.send('Bot is alive!');
+});
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
+
 const voiceChannelId = '1368359914145058956';
-
-const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣'];
-const positionNames = ['GK','CB','CB2','CM','LW','RW','ST'];
-const active = new Set();
-
-// Format the reaction role message with username + mention
-async function formatPositionMessage(claimedMap) {
-  let lines = ['React to claim your position:\n'];
-  for (let i = 0; i < 7; i++) {
-    const emoji = numberEmojis[i];
-    const pos = positionNames[i];
-    if (claimedMap.has(i)) {
-      try {
-        const user = await client.users.fetch(claimedMap.get(i));
-        lines.push(`${emoji} ${pos} - ${user.tag} (<@${user.id}>)`);
-      } catch {
-        lines.push(`${emoji} ${pos} - Unknown User`);
-      }
-    } else {
-      lines.push(`${emoji} ${pos} - Unclaimed`);
-    }
-  }
-  return lines.join('\n');
-}
+let currentVC;
 
 async function connectToVC(guild) {
   try {
-    const channel = guild.channels.cache.get(voiceChannelId);
-    if (!channel || channel.type !== 2) return;
-    const connection = joinVoiceChannel({
+    const channel = await guild.channels.fetch(voiceChannelId);
+    if (!channel?.isVoiceBased()) return;
+    currentVC = joinVoiceChannel({
       channelId: channel.id,
       guildId: guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator,
+      adapterCreator: guild.voiceAdapterCreator,
       selfMute: true
     });
-    await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+    await entersState(currentVC, VoiceConnectionStatus.Ready, 30_000);
     console.log('🔊 Connected to VC');
   } catch (err) {
     console.error('Failed to join VC:', err);
@@ -82,133 +64,194 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     !newState.channelId &&
     oldState.member?.user.id === client.user.id
   ) {
-    await wait(5000);
-    await connectToVC(oldState.guild);
+    setTimeout(() => connectToVC(oldState.guild), 5000);
   }
 });
 
-async function runHostFriendly(channel, hostMember) {
-  const hasPermission =
-    hostMember.permissions.has(PermissionsBitField.Flags.Administrator) ||
-    hostMember.roles.cache.some(r => r.name === 'Friendlies Department');
-  if (!hasPermission) {
-    await channel.send('❌ Only Admins or members of **Friendlies Department** can host.');
-    return;
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+
+  // React ✅ to @everyone or @here pings
+  if (message.content.toLowerCase().includes('@everyone') || message.content.toLowerCase().includes('@here')) {
+    try {
+      await message.react('✅');
+    } catch {
+      // Ignore
+    }
   }
 
-  if (active.has(channel.id)) {
-    await channel.send('❌ A friendly is already being hosted in this channel.');
-    return;
-  }
+  // === !hostfriendly command ===
+  if (message.content.toLowerCase().startsWith('!hostfriendly')) {
+    const args = message.content.split(' ');
+    const positions = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
+    const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
+    const positionMap = {}; // emoji -> user
+    const claimed = new Map(); // userID -> emoji
 
-  active.add(channel.id);
-
-  const claimedMap = new Map();
-  const claimedUsers = new Set();
-
-  // Initial message with reaction roles, use async formatPositionMessage
-  const ann = await channel.send(await formatPositionMessage(claimedMap));
-  for (const e of numberEmojis) await ann.react(e);
-
-  let done = false;
-  const collector = ann.createReactionCollector({ time: 10 * 60_000 });
-
-  collector.on('collect', async (reaction, user) => {
-    if (user.bot || done) return;
-    const idx = numberEmojis.indexOf(reaction.emoji.name);
-    if (idx === -1) return;
-
-    if (claimedUsers.has(user.id) || claimedMap.has(idx)) {
-      reaction.users.remove(user.id).catch(() => {});
-      return;
+    // Permission check: Admin or Friendlies Department role
+    const member = message.member;
+    if (
+      !member.permissions.has(PermissionsBitField.Flags.Administrator) &&
+      !member.roles.cache.some(r => r.name === 'Friendlies Department')
+    ) {
+      return message.channel.send('❌ Only Admins or members of **Friendlies Department** can host.');
     }
 
-    setTimeout(async () => {
-      if (claimedUsers.has(user.id) || claimedMap.has(idx)) return;
-      claimedMap.set(idx, user.id);
-      claimedUsers.add(user.id);
-      await ann.edit(await formatPositionMessage(claimedMap));
-      if (claimedMap.size >= 7 && !done) {
-        done = true;
-        collector.stop();
-      }
-    }, 3000);
-  });
+    // Check for active friendly in channel (optional, can remove if you want multiple)
+    // You can implement a Set to prevent multiple simultaneous friendlies per channel if desired
 
-  collector.on('end', async () => {
-    if (claimedMap.size < 7) {
-      await channel.send('❌ Not enough players reacted. Friendly cancelled.');
-      active.delete(channel.id);
-      return;
+    // Optional host position
+    const hostPosition = args[1]?.toUpperCase();
+    if (hostPosition && !positions.includes(hostPosition)) {
+      return message.channel.send(`❌ Invalid position. Choose one of: ${positions.join(', ')}`);
     }
-    // Final lineup with username + mention
-    const finalLines = [];
-    for (let i = 0; i < 7; i++) {
-      const uid = claimedMap.get(i);
-      try {
-        const user = await client.users.fetch(uid);
-        finalLines.push(`${positionNames[i]} — ${user.tag} (<@${user.id}>)`);
-      } catch {
-        finalLines.push(`${positionNames[i]} — Unknown User`);
+
+    // Assign host position if specified
+    if (hostPosition) {
+      const idx = positions.indexOf(hostPosition);
+      const emoji = emojis[idx];
+      positionMap[emoji] = message.author;
+      claimed.set(message.author.id, emoji);
+    }
+
+    // Build initial embed
+    const embed = new EmbedBuilder()
+      .setTitle('Agnello FC Friendly Positions')
+      .setDescription(positions.map((pos, i) => {
+        const emoji = emojis[i];
+        const user = positionMap[emoji];
+        return `${emoji} ${pos}: ${user ? `<@${user.id}> (${user.username})` : 'Unclaimed'}`;
+      }).join('\n'))
+      .setColor(0x00AE86);
+
+    const sent = await message.channel.send({ content: '@here React to claim a position!', embeds: [embed] });
+
+    // React only with emojis for unclaimed positions
+    for (let i = 0; i < emojis.length; i++) {
+      if (!positionMap[emojis[i]]) {
+        await sent.react(emojis[i]);
       }
     }
-    await channel.send('✅ Final Positions:\n' + finalLines.join('\n'));
 
-    // Wait for host to send the friendly link, then DM players
-    const filter = msg =>
-      msg.author.id === hostMember.id &&
-      msg.channel.id === channel.id &&
-      msg.content.includes('https://');
-    const linkCollector = channel.createMessageCollector({ filter, time: 5 * 60_000, max: 1 });
+    const filter = (reaction, user) => emojis.includes(reaction.emoji.name) && !user.bot;
 
-    linkCollector.on('collect', async msg => {
-      const link = msg.content.trim();
-      for (const uid of claimedMap.values()) {
-        try {
-          const u = await client.users.fetch(uid);
-          await u.send(`Here’s the friendly, join up: ${link}`);
-        } catch {
-          console.error('❌ Failed to DM', uid);
+    const collector = sent.createReactionCollector({ filter, time: 600_000 });
+
+    collector.on('collect', async (reaction, user) => {
+      // Only one position per user
+      if (claimed.has(user.id)) {
+        reaction.users.remove(user.id).catch(() => {});
+        return;
+      }
+
+      const emoji = reaction.emoji.name;
+
+      // Position must be free
+      if (positionMap[emoji]) {
+        reaction.users.remove(user.id).catch(() => {});
+        return;
+      }
+
+      // Assign position
+      positionMap[emoji] = user;
+      claimed.set(user.id, emoji);
+
+      // Update embed
+      const updatedEmbed = new EmbedBuilder()
+        .setTitle('Agnello FC Friendly Positions')
+        .setDescription(positions.map((pos, i) => {
+          const e = emojis[i];
+          const u = positionMap[e];
+          return `${e} ${pos}: ${u ? `<@${u.id}> (${u.username})` : 'Unclaimed'}`;
+        }).join('\n'))
+        .setColor(0x00AE86);
+
+      await sent.edit({ embeds: [updatedEmbed] });
+
+      if (claimed.size === 7) {
+        collector.stop('filled');
+      }
+    });
+
+    // Ping @here at 1 minute if not full
+    setTimeout(() => {
+      if (claimed.size < 7) {
+        message.channel.send('@here Need more reactions to start the friendly!');
+      }
+    }, 60_000);
+
+    // Cancel friendly after 10 minutes if not full
+    setTimeout(() => {
+      if (claimed.size < 7) {
+        message.channel.send('❌ Friendly cancelled — not enough players after 10 minutes.');
+        collector.stop('timeout');
+      }
+    }, 600_000);
+
+    collector.on('end', async (collected, reason) => {
+      if (reason === 'filled') {
+        await message.channel.send('✅ All positions claimed! Waiting for host to post the invite link...');
+      } else if (reason === 'timeout') {
+        return;
+      }
+
+      // Wait for host to post link in same channel
+      const filterLink = m => m.author.id === message.author.id && m.channel.id === message.channel.id && m.content.includes('https://');
+      const linkCollector = message.channel.createMessageCollector({ filter: filterLink, time: 5 * 60_000, max: 1 });
+
+      linkCollector.on('collect', async (msg) => {
+        const link = msg.content.trim();
+
+        // DM all claimed players
+        const failed = [];
+        for (const user of claimed.values()) {
+          try {
+            const u = await client.users.fetch(user.id);
+            await u.send(`Here’s the friendly, join up: ${link}`);
+          } catch {
+            failed.push(user.username || user.id);
+          }
         }
-      }
-      await channel.send('✅ DMs sent!');
-      active.delete(channel.id);
+
+        if (failed.length) {
+          message.channel.send(`❌ Failed to DM: ${failed.join(', ')}`);
+        } else {
+          message.channel.send('✅ DMs sent to all players!');
+        }
+      });
+
+      linkCollector.on('end', collected => {
+        if (collected.size === 0) {
+          message.channel.send('❌ No invite link received. Friendly not shared.');
+        }
+      });
     });
 
-    linkCollector.on('end', collected => {
-      if (collected.size === 0) {
-        channel.send('❌ No link received—friendly not shared.');
-        active.delete(channel.id);
-      }
-    });
-  });
-}
-
-client.on('messageCreate', async msg => {
-  if (msg.author.bot) return;
-
-  if (msg.content === '!hostfriendly') {
-    await runHostFriendly(msg.channel, msg.member);
     return;
   }
 
-  if (msg.content === '!joinvc') {
-    await connectToVC(msg.guild);
-    msg.channel.send('🔊 Joining VC...');
+  // === !joinvc command ===
+  if (message.content.toLowerCase() === '!joinvc') {
+    if (!message.guild) return;
+    await connectToVC(message.guild);
+    message.channel.send('🔊 Joining VC...');
     return;
   }
 
-  if (msg.content.startsWith('!dmrole')) {
-    const [_, roleMention, ...rest] = msg.content.split(' ');
+  // === !dmrole command ===
+  if (message.content.toLowerCase().startsWith('!dmrole')) {
+    if (!message.guild) return;
+    const [_, roleMention, ...rest] = message.content.split(' ');
     const text = rest.join(' ');
     if (!roleMention || !text) {
-      return msg.reply('❌ Usage: `!dmrole @Role message`');
+      return message.reply('❌ Usage: `!dmrole @Role message`');
     }
     const roleId = roleMention.replace(/[<@&>]/g, '');
-    const role = msg.guild.roles.cache.get(roleId);
-    if (!role) return msg.reply('❌ Role not found.');
+    const role = message.guild.roles.cache.get(roleId);
+    if (!role) return message.reply('❌ Role not found.');
+
     const failed = [];
-    await msg.reply(`📨 Sending to **${role.name}**...`);
+    await message.reply(`📨 Sending to **${role.name}**...`);
     for (const member of role.members.values()) {
       try {
         await member.send(`<@${member.id}>`);
@@ -218,37 +261,41 @@ client.on('messageCreate', async msg => {
       }
     }
     if (failed.length) {
-      await msg.author.send(`❌ Failed to DM: ${failed.join(', ')}`);
+      await message.author.send(`❌ Failed to DM: ${failed.join(', ')}`);
     }
-    msg.channel.send('✅ DMs sent!');
+    message.channel.send('✅ DMs sent!');
     return;
   }
 
-  if (msg.content.startsWith('!dmchannel')) {
-    const [_, channelMention] = msg.content.split(' ');
-    if (!channelMention) {
-      return msg.reply('❌ Usage: `!dmchannel #channel`');
+  // === !dmchannel command ===
+  if (message.content.toLowerCase().startsWith('!dmchannel')) {
+    if (!message.guild) return;
+    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return message.reply('❌ You need Admin permission.');
     }
-    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return msg.reply('❌ You need Admin permission.');
+    const [_, channelMention] = message.content.split(' ');
+    if (!channelMention) {
+      return message.reply('❌ Usage: `!dmchannel #channel`');
     }
     const channelId = channelMention.replace(/[<#>]/g, '');
-    let target;
+    let targetChannel;
     try {
-      target = await msg.guild.channels.fetch(channelId);
+      targetChannel = await message.guild.channels.fetch(channelId);
     } catch {
-      return msg.reply('❌ Invalid channel.');
+      return message.reply('❌ Invalid channel.');
     }
-    if (!target || !target.isTextBased()) {
-      return msg.reply('❌ Not a text channel.');
+    if (!targetChannel?.isTextBased()) {
+      return message.reply('❌ Not a text channel.');
     }
-    const fetched = await target.messages.fetch({ limit: 100 });
+    const fetched = await targetChannel.messages.fetch({ limit: 100 });
     const users = new Set();
     fetched.forEach(m => {
       if (!m.author.bot) users.add(m.author);
     });
-    const invite = 'https://discord.gg/cbpWRu6xn5';
+
+    const invite = 'https://discord.gg/cbpWRu6xn5'; // your invite link
     const failed = [];
+
     for (const user of users) {
       try {
         await user.send(invite);
@@ -256,12 +303,13 @@ client.on('messageCreate', async msg => {
         failed.push(user.tag);
       }
     }
-    msg.reply(`✅ DMed ${users.size - failed.length} users.` +
-      (failed.length ? ` ❌ Failed: ${failed.join(', ')}` : ''));
+
+    message.reply(`✅ DMed ${users.size - failed.length} users.` + (failed.length ? ` ❌ Failed: ${failed.join(', ')}` : ''));
     return;
   }
 });
 
-client.login(token);
+client.login(process.env.TOKEN);
+
 process.on('unhandledRejection', console.error);
 process.on('uncaughtException', console.error);
