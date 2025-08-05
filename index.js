@@ -26,7 +26,6 @@ app.get('/', (_, res) => res.send('Bot is alive!'));
 app.listen(3000, () => console.log('Server running'));
 
 const wait = ms => new Promise(res => setTimeout(res, ms));
-
 const token = process.env.DISCORD_TOKEN;
 const voiceChannelId = '1368359914145058956';
 
@@ -89,80 +88,53 @@ async function runHostFriendly(channel, hostMember) {
     await channel.send('❌ Only Admins or members of **Friendlies Department** can host.');
     return;
   }
-  if (active.has(channel.id)) {
-    await channel.send('❌ A friendly is already being hosted in this channel.');
-    return;
-  }
+
   active.add(channel.id);
 
-  // initial claimed map: emoji index -> userId
+  // Track who claims
   const claimedMap = new Map();
   const claimedUsers = new Set();
 
-  // send initial message
-  const ann = await channel.send(
-    formatPositionMessage(claimedMap)
-  );
+  const ann = await channel.send(formatPositionMessage(claimedMap));
   for (const e of numberEmojis) await ann.react(e);
 
   let done = false;
-  // ping @everyone 3 times over first minute
-  let pingCount = 0;
-  const pingInterval = setInterval(async () => {
-    if (done || pingCount >= 3 || claimedMap.size >= 7) {
-      clearInterval(pingInterval);
-      return;
-    }
-    await channel.send({
-      content: '@everyone react to get positions!',
-      allowedMentions: { parse: ['everyone'] }
-    });
-    pingCount++;
-  }, 20_000);
-
   const collector = ann.createReactionCollector({ time: 10 * 60_000 });
 
   collector.on('collect', async (reaction, user) => {
     if (user.bot || done) return;
     const idx = numberEmojis.indexOf(reaction.emoji.name);
     if (idx === -1) return;
-    if (claimedUsers.has(user.id)) {
+    if (claimedUsers.has(user.id) || claimedMap.has(idx)) {
       reaction.users.remove(user.id).catch(() => {});
       return;
     }
-    if (!claimedMap.has(idx)) {
-      // first-come, first-serve
-      setTimeout(async () => {
-        if (claimedUsers.has(user.id)) return;
-        claimedMap.set(idx, user.id);
-        claimedUsers.add(user.id);
-        // update the message
-        await ann.edit(formatPositionMessage(claimedMap));
-        if (claimedMap.size >= 7 && !done) {
-          done = true;
-          collector.stop('full');
-        }
-      }, 3000);
-    } else {
-      reaction.users.remove(user.id).catch(() => {});
-    }
+    setTimeout(async () => {
+      if (claimedUsers.has(user.id) || claimedMap.has(idx)) return;
+      claimedMap.set(idx, user.id);
+      claimedUsers.add(user.id);
+      await ann.edit(formatPositionMessage(claimedMap));
+      if (claimedMap.size >= 7 && !done) {
+        done = true;
+        collector.stop();
+      }
+    }, 3000);
   });
 
   collector.on('end', async () => {
-    clearInterval(pingInterval);
-    if (!done || claimedMap.size < 7) {
+    if (claimedMap.size < 7) {
       await channel.send('❌ Not enough players reacted. Friendly cancelled.');
       active.delete(channel.id);
       return;
     }
-    // all positions filled
-    await channel.send('✅ All positions claimed! Final lineup:');
-    for (let i = 0; i < 7; i++) {
-      const userId = claimedMap.get(i);
-      await channel.send(`${positionNames[i]} — <@${userId}>`);
-    }
+    // Final lineup
+    const finalLines = positionNames.map((pos, i) => {
+      const uid = claimedMap.get(i);
+      return `${pos} — ${uid ? `<@${uid}>` : 'OPEN'}`;
+    });
+    await channel.send('✅ Final Positions:\n' + finalLines.join('\n'));
 
-    // collect host link and DM players
+    // Wait for host link
     const filter = msg =>
       msg.author.id === hostMember.id &&
       msg.channel.id === channel.id &&
@@ -171,16 +143,15 @@ async function runHostFriendly(channel, hostMember) {
 
     linkCollector.on('collect', async msg => {
       const link = msg.content.trim();
-      for (const userId of claimedMap.values()) {
+      for (const uid of claimedMap.values()) {
         try {
-          const u = await client.users.fetch(userId);
-          await u.send(`<@${userId}>`);
+          const u = await client.users.fetch(uid);
           await u.send(`Here’s the friendly, join up: ${link}`);
         } catch {
-          console.error('❌ Failed to DM', userId);
+          console.error('❌ Failed to DM', uid);
         }
       }
-      await channel.send('✅ DMs sent to all players!');
+      await channel.send('✅ DMs sent!');
       active.delete(channel.id);
     });
 
@@ -196,40 +167,82 @@ async function runHostFriendly(channel, hostMember) {
 client.on('messageCreate', async msg => {
   if (msg.author.bot) return;
 
+  // Host friendly
   if (msg.content === '!hostfriendly') {
     await runHostFriendly(msg.channel, msg.member);
+    return;
   }
 
+  // Join VC
   if (msg.content === '!joinvc') {
     await connectToVC(msg.guild);
     msg.channel.send('🔊 Joining VC...');
+    return;
   }
 
+  // DM a role
   if (msg.content.startsWith('!dmrole')) {
-    const args = msg.content.split(' ');
-    const roleMention = args[1];
-    const messageToSend = args.slice(2).join(' ');
-    if (!roleMention || !messageToSend) {
-      return msg.reply('❌ Usage: `!dmrole @Role message here`');
+    const [_, roleMention, ...rest] = msg.content.split(' ');
+    const text = rest.join(' ');
+    if (!roleMention || !text) {
+      return msg.reply('❌ Usage: `!dmrole @Role message`');
     }
     const roleId = roleMention.replace(/[<@&>]/g, '');
     const role = msg.guild.roles.cache.get(roleId);
     if (!role) return msg.reply('❌ Role not found.');
-
     const failed = [];
-    msg.reply(`📨 Sending messages to **${role.name}**...`);
+    await msg.reply(`📨 Sending to **${role.name}**...`);
     for (const member of role.members.values()) {
       try {
         await member.send(`<@${member.id}>`);
-        await member.send(messageToSend);
+        await member.send(text);
       } catch {
         failed.push(member.user.tag);
       }
     }
     if (failed.length) {
-      await msg.author.send(`❌ Failed to DM these users:\n${failed.join('\n')}`);
+      await msg.author.send(`❌ Failed to DM: ${failed.join(', ')}`);
     }
     msg.channel.send('✅ DMs sent!');
+    return;
+  }
+
+  // DM everyone active in a mentioned channel
+  if (msg.content.startsWith('!dmchannel')) {
+    const [_, channelMention] = msg.content.split(' ');
+    if (!channelMention) {
+      return msg.reply('❌ Usage: `!dmchannel #channel`');
+    }
+    if (!msg.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return msg.reply('❌ You need Admin permission.');
+    }
+    const channelId = channelMention.replace(/[<#>]/g, '');
+    let target;
+    try {
+      target = await msg.guild.channels.fetch(channelId);
+    } catch {
+      return msg.reply('❌ Invalid channel.');
+    }
+    if (!target || !target.isTextBased()) {
+      return msg.reply('❌ Not a text channel.');
+    }
+    const fetched = await target.messages.fetch({ limit: 100 });
+    const users = new Set();
+    fetched.forEach(m => {
+      if (!m.author.bot) users.add(m.author);
+    });
+    const invite = 'https://discord.gg/cbpWRu6xn5';
+    const failed = [];
+    for (const user of users) {
+      try {
+        await user.send(invite);
+      } catch {
+        failed.push(user.tag);
+      }
+    }
+    msg.reply(`✅ DMed ${users.size - failed.length} users.` +
+      (failed.length ? ` ❌ Failed: ${failed.join(', ')}` : ''));
+    return;
   }
 });
 
