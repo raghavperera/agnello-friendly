@@ -33,15 +33,22 @@ const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣
 const positionNames = ['GK','CB','CB2','CM','LW','RW','ST'];
 const active = new Set();
 
-function formatPositionMessage(claimedMap) {
+// Format the reaction role message with username + mention
+async function formatPositionMessage(claimedMap) {
   let lines = ['React to claim your position:\n'];
   for (let i = 0; i < 7; i++) {
     const emoji = numberEmojis[i];
     const pos = positionNames[i];
-    const claimant = claimedMap.has(i)
-      ? `<@${claimedMap.get(i)}>`
-      : 'Unclaimed';
-    lines.push(`${emoji} ${pos} - ${claimant}`);
+    if (claimedMap.has(i)) {
+      try {
+        const user = await client.users.fetch(claimedMap.get(i));
+        lines.push(`${emoji} ${pos} - ${user.tag} (<@${user.id}>)`);
+      } catch {
+        lines.push(`${emoji} ${pos} - Unknown User`);
+      }
+    } else {
+      lines.push(`${emoji} ${pos} - Unclaimed`);
+    }
   }
   return lines.join('\n');
 }
@@ -89,13 +96,18 @@ async function runHostFriendly(channel, hostMember) {
     return;
   }
 
+  if (active.has(channel.id)) {
+    await channel.send('❌ A friendly is already being hosted in this channel.');
+    return;
+  }
+
   active.add(channel.id);
 
-  // Track who claims
   const claimedMap = new Map();
   const claimedUsers = new Set();
 
-  const ann = await channel.send(formatPositionMessage(claimedMap));
+  // Initial message with reaction roles, use async formatPositionMessage
+  const ann = await channel.send(await formatPositionMessage(claimedMap));
   for (const e of numberEmojis) await ann.react(e);
 
   let done = false;
@@ -105,15 +117,17 @@ async function runHostFriendly(channel, hostMember) {
     if (user.bot || done) return;
     const idx = numberEmojis.indexOf(reaction.emoji.name);
     if (idx === -1) return;
+
     if (claimedUsers.has(user.id) || claimedMap.has(idx)) {
       reaction.users.remove(user.id).catch(() => {});
       return;
     }
+
     setTimeout(async () => {
       if (claimedUsers.has(user.id) || claimedMap.has(idx)) return;
       claimedMap.set(idx, user.id);
       claimedUsers.add(user.id);
-      await ann.edit(formatPositionMessage(claimedMap));
+      await ann.edit(await formatPositionMessage(claimedMap));
       if (claimedMap.size >= 7 && !done) {
         done = true;
         collector.stop();
@@ -127,14 +141,20 @@ async function runHostFriendly(channel, hostMember) {
       active.delete(channel.id);
       return;
     }
-    // Final lineup
-    const finalLines = positionNames.map((pos, i) => {
+    // Final lineup with username + mention
+    const finalLines = [];
+    for (let i = 0; i < 7; i++) {
       const uid = claimedMap.get(i);
-      return `${pos} — ${uid ? `<@${uid}>` : 'OPEN'}`;
-    });
+      try {
+        const user = await client.users.fetch(uid);
+        finalLines.push(`${positionNames[i]} — ${user.tag} (<@${user.id}>)`);
+      } catch {
+        finalLines.push(`${positionNames[i]} — Unknown User`);
+      }
+    }
     await channel.send('✅ Final Positions:\n' + finalLines.join('\n'));
 
-    // Wait for host link
+    // Wait for host to send the friendly link, then DM players
     const filter = msg =>
       msg.author.id === hostMember.id &&
       msg.channel.id === channel.id &&
@@ -167,20 +187,17 @@ async function runHostFriendly(channel, hostMember) {
 client.on('messageCreate', async msg => {
   if (msg.author.bot) return;
 
-  // Host friendly
   if (msg.content === '!hostfriendly') {
     await runHostFriendly(msg.channel, msg.member);
     return;
   }
 
-  // Join VC
   if (msg.content === '!joinvc') {
     await connectToVC(msg.guild);
     msg.channel.send('🔊 Joining VC...');
     return;
   }
 
-  // DM a role
   if (msg.content.startsWith('!dmrole')) {
     const [_, roleMention, ...rest] = msg.content.split(' ');
     const text = rest.join(' ');
@@ -207,7 +224,6 @@ client.on('messageCreate', async msg => {
     return;
   }
 
-  // DM everyone active in a mentioned channel
   if (msg.content.startsWith('!dmchannel')) {
     const [_, channelMention] = msg.content.split(' ');
     if (!channelMention) {
