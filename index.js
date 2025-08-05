@@ -1,3 +1,4 @@
+
 import {
   Client,
   GatewayIntentBits,
@@ -20,7 +21,6 @@ import ytdl from 'ytdl-core';
 import ytsr from 'ytsr';
 import 'dotenv/config';
 
-// Create client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -59,9 +59,7 @@ async function connectVC(guild) {
 // When bot is ready
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  // Show "Listening to Spotify"
   client.user.setActivity('Spotify', { type: ActivityType.Listening });
-  // Auto join VC
   const guild = client.guilds.cache.get(process.env.GUILD_ID);
   if (guild) await connectVC(guild);
 });
@@ -83,7 +81,7 @@ client.on('voiceStateUpdate', (oldS, newS) => {
   }
 });
 
-// React ✅ to @everyone/@here
+// ✅ reaction to @everyone/@here
 client.on('messageCreate', async (message) => {
   if (
     !message.author.bot &&
@@ -138,7 +136,6 @@ client.on('messageCreate', async (message) => {
   const [cmd, ...args] = message.content.trim().split(/ +/);
   const arg = args.join(' ');
 
-  // === Music Commands ===
   if (cmd === '!play') {
     if (!arg) return message.reply('❌ Usage: `!play <song name or URL>`');
     const vc = message.member.voice.channel;
@@ -201,132 +198,5 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // === !dmrole Prefix ===
-  if (cmd === '!dmrole') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
-    const role = message.mentions.roles.first();
-    if (!role) return message.reply('❌ Please mention a role.');
-    const text = arg.replace(/<@&\d+>/, '').trim();
-    const failed = [];
-    await message.reply(`📨 Sending to **${role.name}**...`);
-    for (const m of role.members.values()) {
-      if (dmCache.has(m.id)) continue;
-      try {
-        await m.send(text);
-        dmCache.add(m.id);
-      } catch {
-        failed.push(m.user.tag);
-      }
-    }
-    if (failed.length) {
-      message.author.send(`❌ Failed to DM: ${failed.join(', ')}`);
-    }
-    message.channel.send('✅ DMs sent!');
-    return;
-  }
-
-  // === /dmrole Slash ===
-  // Make sure you've registered this slash cmd separately
-  if (message.content === '!dmchannel') {
-    // (Using prefix for simplicity)
-    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
-    const channel = await client.channels.fetch('1325529675912450239');
-    const invite = 'https://discord.gg/cbpWRu6xn5';
-    for (const m of channel.members.values()) {
-      if (dmCache.has(m.id)) continue;
-      try {
-        await m.send(`Join our server: ${invite}`);
-        dmCache.add(m.id);
-      } catch {}
-    }
-    message.reply('✅ DMs sent to channel members.');
-    return;
-  }
-
-  // === !hostfriendly ===
-  if (cmd === '!hostfriendly') {
-    // Permission
-    const canHost =
-      message.member.permissions.has(PermissionsBitField.Flags.Administrator) ||
-      message.member.roles.cache.some((r) => r.name === 'Friendlies Department');
-    if (!canHost) return;
-    // Setup positions
-    const positions = Array(7).fill(null);
-    const names = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
-    const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
-    const hostPos = args[0]?.toUpperCase();
-    const idx = names.indexOf(hostPos);
-    if (idx !== -1) positions[idx] = message.author;
-    // Build embed
-    const makeEmbed = () =>
-      new EmbedBuilder()
-        .setTitle('Agnello FC Friendly Positions')
-        .setDescription(
-          names
-            .map((n, i) => `${emojis[i]} ${n}: ${positions[i] ? `<@${positions[i].id}>` : 'Unclaimed'}`)
-            .join('\n')
-        )
-        .setColor(0x00ae86);
-    const sent = await message.channel.send({
-      content: '@here React to claim a position!',
-      embeds: [makeEmbed()],
-      allowedMentions: { parse: ['users', 'everyone'] },
-    });
-    // React
-    for (let i = 0; i < 7; i++) if (!positions[i]) await sent.react(emojis[i]);
-    const claimed = new Map();
-    const collector = sent.createReactionCollector({ time: 600000, filter: (r, u) => emojis.includes(r.emoji.name) && !u.bot });
-    collector.on('collect', async (reaction, user) => {
-      if (claimed.has(user.id)) return reaction.users.remove(user.id);
-      const i = emojis.indexOf(reaction.emoji.name);
-      if (positions[i]) return reaction.users.remove(user.id);
-      positions[i] = user;
-      claimed.set(user.id, i);
-      await sent.edit({ embeds: [makeEmbed()], allowedMentions: { parse: ['users'] } });
-      if (claimed.size === 7) collector.stop('filled');
-    });
-    // 1-min @here ping
-    setTimeout(() => {
-      if (claimed.size < 7) {
-        message.channel.send({ content: '@here Need more reactions to start!', allowedMentions: { parse: ['everyone'] } });
-      }
-    }, 60000);
-    // 10-min cancel
-    setTimeout(() => {
-      if (claimed.size < 7) {
-        message.channel.send('❌ Friendly cancelled — not enough players.');
-        collector.stop();
-      }
-    }, 600000);
-    collector.on('end', (_, reason) => {
-      if (reason === 'filled') message.channel.send('✅ All positions filled! Post invite link to DM players.');
-      // Wait for link
-      const linkCollector = message.channel.createMessageCollector({
-        filter: (m) => m.author.id === message.author.id && m.content.includes('https://'),
-        time: 300000,
-        max: 1,
-      });
-      linkCollector.on('collect', async (m) => {
-        const link = m.content.trim();
-        const failed = [];
-        for (const [userId] of claimed) {
-          try {
-            (await client.users.fetch(userId)).send(`Here’s the friendly, join up: ${link}`);
-          } catch {
-            failed.push(userId);
-          }
-        }
-        if (failed.length) message.channel.send(`❌ Failed to DM: ${failed.join(', ')}`);
-        else message.channel.send('✅ DMs sent to all players!');
-      });
-    });
-    return;
-  }
+  // Add !dmrole, !dmchannel, and final !hostfriendly next
 });
-
-// Login
-client.login(process.env.TOKEN);
-
-// Error handling
-process.on('unhandledRejection', console.error);
-process.on('uncaughtException', console.error);
