@@ -5,20 +5,15 @@ import {
   Partials,
   PermissionsBitField,
   EmbedBuilder,
-  ActivityType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Events
 } from 'discord.js';
-import {
-  joinVoiceChannel,
-  entersState,
-  VoiceConnectionStatus,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  NoSubscriberBehavior,
-} from '@discordjs/voice';
+import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs/voice';
 import express from 'express';
-import ytdl from 'ytdl-core';
-import ytsr from 'ytsr';
+import { createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, getVoiceConnection } from '@discordjs/voice';
+import play from 'play-dl';
 import 'dotenv/config';
 
 const client = new Client({
@@ -28,175 +23,144 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.DirectMessages
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
+  partials: [Partials.Channel]
 });
 
-// Keep-alive HTTP
-express()
-  .listen(process.env.PORT || 3000, () => console.log('Server is up'));
+const expressApp = express();
+expressApp.get('/', (req, res) => res.send('Agnello FC bot is online!'));
+expressApp.listen(3000, () => console.log('Express server running'));
 
-// Voice channel to auto-join
-const VC_ID = '1368359914145058956';
-let reconnecting = false;
+let cachedDMs = new Set();
+let currentVoiceConnection;
 
-// Connect (or reconnect) to VC
-async function connectVC(guild) {
-  const channel = await guild.channels.fetch(VC_ID);
-  if (!channel?.isVoiceBased()) return;
-  const conn = joinVoiceChannel({
-    channelId: VC_ID,
+// Auto join VC
+async function joinVC(guild) {
+  const channel = guild.channels.cache.get('1368359914145058956');
+  if (!channel || channel.type !== 2) return;
+  currentVoiceConnection = joinVoiceChannel({
+    channelId: channel.id,
     guildId: guild.id,
     adapterCreator: guild.voiceAdapterCreator,
-    selfMute: true,
+    selfMute: true
   });
-  await entersState(conn, VoiceConnectionStatus.Ready, 30_000);
-  return conn;
+  entersState(currentVoiceConnection, VoiceConnectionStatus.Ready, 30_000);
 }
 
-// When bot is ready
-client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}`);
-  client.user.setActivity('Spotify', { type: ActivityType.Listening });
-  const guild = client.guilds.cache.get(process.env.GUILD_ID);
-  if (guild) await connectVC(guild);
-});
-
-// Reconnect logic if bot is kicked
-client.on('voiceStateUpdate', (oldS, newS) => {
-  if (
-    oldS.channelId === VC_ID &&
-    !newS.channelId &&
-    oldS.member.user.id === client.user.id &&
-    !reconnecting
-  ) {
-    reconnecting = true;
-    setTimeout(async () => {
-      const guild = oldS.guild;
-      await connectVC(guild);
-      reconnecting = false;
-    }, 5000);
+// Reconnect on disconnect
+client.on('voiceStateUpdate', (_, newState) => {
+  if (!newState.channelId && currentVoiceConnection) {
+    joinVC(newState.guild).catch(console.error);
   }
 });
 
-// ✅ reaction to @everyone/@here
-client.on('messageCreate', async (message) => {
-  if (
-    !message.author.bot &&
-    (message.content.includes('@everyone') || message.content.includes('@here'))
-  ) {
-    message.react('✅').catch(() => {});
+// ✅ on @everyone
+client.on('messageCreate', async msg => {
+  if (msg.mentions.everyone) {
+    try {
+      await msg.react('✅');
+    } catch {}
   }
 });
 
-// --- DM Cache to prevent dupes ---
-const dmCache = new Set();
+// Music commands
+const queue = new Map();
 
-// --- Music Queues ---
-const queues = new Map();
+async function execute(message, serverQueue) {
+  const args = message.content.split(' ');
+  const voiceChannel = message.member.voice.channel;
+  if (!voiceChannel) return message.reply('Join a VC first.');
+  const permissions = voiceChannel.permissionsFor(message.client.user);
+  if (!permissions.has('Connect') || !permissions.has('Speak')) return;
 
-async function ensureMusic(guildId, voiceChannel) {
-  if (!queues.has(guildId)) {
-    const conn = await connectVC(voiceChannel.guild);
-    const player = createAudioPlayer({
-      behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
+  const songInfo = await play.search(args.slice(1).join(' '), { limit: 1 });
+  if (!songInfo.length) return message.reply('No results.');
+  const song = {
+    title: songInfo[0].title,
+    url: songInfo[0].url
+  };
+
+  if (!serverQueue) {
+    const queueContruct = {
+      textChannel: message.channel,
+      voiceChannel,
+      connection: null,
+      songs: [],
+      volume: 5,
+      playing: true,
+      loop: false
+    };
+    queue.set(message.guild.id, queueContruct);
+    queueContruct.songs.push(song);
+
+    try {
+      const connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: message.guild.id,
+        adapterCreator: message.guild.voiceAdapterCreator
+      });
+      queueContruct.connection = connection;
+      playSong(message.guild, queueContruct.songs[0]);
+    } catch (err) {
+      queue.delete(message.guild.id);
+      console.error(err);
+      return message.reply(err.message);
+    }
+  } else {
+    serverQueue.songs.push(song);
+    return message.reply(`${song.title} added to queue.`);
+  }
+}
+
+function playSong(guild, song) {
+  const serverQueue = queue.get(guild.id);
+  if (!song) {
+    serverQueue.connection.destroy();
+    queue.delete(guild.id);
+    return;
+  }
+
+  play.stream(song.url).then(stream => {
+    const resource = createAudioResource(stream.stream, {
+      inputType: stream.type
     });
-    conn.subscribe(player);
-    queues.set(guildId, { conn, player, songs: [], loop: false });
+    const player = createAudioPlayer();
+    player.play(resource);
+    serverQueue.connection.subscribe(player);
+
     player.on(AudioPlayerStatus.Idle, () => {
-      const q = queues.get(guildId);
-      if (!q) return;
-      if (q.loop && q.songs.length) {
-        playTrack(guildId, q.songs[0]);
-      } else {
-        q.songs.shift();
-        if (q.songs.length) playTrack(guildId, q.songs[0]);
-      }
+      if (!serverQueue.loop) serverQueue.songs.shift();
+      playSong(guild, serverQueue.songs[0]);
     });
-  }
-  return queues.get(guildId);
-}
 
-async function playTrack(guildId, song) {
-  const q = queues.get(guildId);
-  if (!q) return;
-  const stream = ytdl(song.url, {
-    filter: 'audioonly',
-    highWaterMark: 1 << 25,
+    serverQueue.textChannel.send(`Now playing: **${song.title}**`);
   });
-  const resource = createAudioResource(stream);
-  q.player.play(resource);
 }
 
-// Main message handler
-client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guild) return;
-  const [cmd, ...args] = message.content.trim().split(/ +/);
-  const arg = args.join(' ');
+client.on('messageCreate', async message => {
+  if (!message.content.startsWith('!') || message.author.bot) return;
 
-  if (cmd === '!play') {
-    if (!arg) return message.reply('❌ Usage: `!play <song name or URL>`');
-    const vc = message.member.voice.channel;
-    if (!vc) return message.reply('❌ You need to join a voice channel first.');
-    await message.reply('🔍 Searching...');
-    let tracks = [];
-    if (ytdl.validateURL(arg)) {
-      const info = await ytdl.getInfo(arg);
-      tracks = [{ title: info.videoDetails.title, url: arg }];
-    } else {
-      const res = await ytsr(arg, { limit: 1 });
-      if (!res.items.length) return message.reply('❌ No results found.');
-      tracks = [{ title: res.items[0].title, url: res.items[0].url }];
-    }
-    const q = await ensureMusic(message.guild.id, vc);
-    q.songs.push(...tracks);
-    if (q.songs.length === tracks.length) {
-      playTrack(message.guild.id, q.songs[0]);
-      message.channel.send(`▶️ Now playing: **${tracks[0].title}**`);
-    } else {
-      message.channel.send(`➕ Added ${tracks.length} track(s) to the queue.`);
-    }
-    return;
+  const serverQueue = queue.get(message.guild.id);
+
+  if (message.content.startsWith('!play')) execute(message, serverQueue);
+  else if (message.content.startsWith('!skip')) {
+    if (!serverQueue) return message.reply('No song to skip.');
+    serverQueue.songs.shift();
+    playSong(message.guild, serverQueue.songs[0]);
+  } else if (message.content.startsWith('!stop')) {
+    if (!serverQueue) return;
+    serverQueue.songs = [];
+    serverQueue.connection.destroy();
+    queue.delete(message.guild.id);
+  } else if (message.content.startsWith('!loop')) {
+    if (!serverQueue) return;
+    serverQueue.loop = !serverQueue.loop;
+    message.reply(`Looping is now ${serverQueue.loop ? 'enabled' : 'disabled'}.`);
+  } else if (message.content.startsWith('!queue')) {
+    if (!serverQueue) return message.reply('No songs in queue.');
+    message.reply(serverQueue.songs.map((s, i) => `${i + 1}. ${s.title}`).join('\n'));
   }
-
-  if (cmd === '!skip') {
-    const q = queues.get(message.guild.id);
-    if (!q || !q.songs.length) return message.reply('❌ Nothing is playing.');
-    q.player.stop();
-    message.reply('⏭️ Skipped.');
-    return;
-  }
-
-  if (cmd === '!stop') {
-    const q = queues.get(message.guild.id);
-    if (!q) return message.reply('❌ Nothing to stop.');
-    q.songs = [];
-    q.player.stop();
-    q.conn.destroy();
-    queues.delete(message.guild.id);
-    message.reply('⏹️ Stopped and cleared the queue.');
-    return;
-  }
-
-  if (cmd === '!loop') {
-    const q = queues.get(message.guild.id);
-    if (!q) return message.reply('❌ Nothing is playing.');
-    q.loop = !q.loop;
-    message.reply(`🔁 Loop is now **${q.loop ? 'enabled' : 'disabled'}**.`);
-    return;
-  }
-
-  if (cmd === '!queue') {
-    const q = queues.get(message.guild.id);
-    if (!q || !q.songs.length) return message.reply('❌ Queue is empty.');
-    const embed = new EmbedBuilder()
-      .setTitle('🎶 Current Queue')
-      .setDescription(q.songs.map((s, i) => `${i + 1}. ${s.title}`).join('\n'));
-    message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  // Add !dmrole, !dmchannel, and final !hostfriendly next
 });
+
+// Additional features (e.g. hostfriendly, dmrole, activitycheck) will be appended next
