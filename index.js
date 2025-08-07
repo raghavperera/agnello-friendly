@@ -1,16 +1,21 @@
-// index.js
 
+// index.js
 import {
   Client,
   GatewayIntentBits,
   Partials,
   PermissionsBitField,
   EmbedBuilder,
-  ActivityType,
-  Events,
-  Collection
+  ActivityType
 } from 'discord.js';
-import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs/voice';
+import {
+  joinVoiceChannel,
+  entersState,
+  VoiceConnectionStatus,
+  createAudioResource,
+  createAudioPlayer,
+  AudioPlayerStatus
+} from '@discordjs/voice';
 import express from 'express';
 import 'dotenv/config';
 import play from 'play-dl';
@@ -68,6 +73,47 @@ client.once('ready', async () => {
   client.user.setActivity('Agnello FC 🔵⚪', { type: ActivityType.Watching });
 });
 
+// Welcome and Goodbye messages
+client.on('guildMemberAdd', async member => {
+  const welcomeChannel = await client.channels.fetch('1361113546829729914');
+  if (welcomeChannel && welcomeChannel.isTextBased()) {
+    welcomeChannel.send(`Welcome to Agnello FC, <@${member.id}>! 🔵⚪`);
+  }
+});
+
+client.on('guildMemberRemove', async member => {
+  const goodbyeChannel = await client.channels.fetch('1361113558347415728');
+  if (goodbyeChannel && goodbyeChannel.isTextBased()) {
+    goodbyeChannel.send(`Goodbye <@${member.id}>. You’ll be missed.`);
+  }
+
+  const dmText = \`Dear <@${member.id}>
+
+We hope this message finds you well. We wanted to take a moment to sincerely apologize for any frustrations, miscommunication, or inactivity that may have led you to leave the team. Your presence truly meant a lot to us—not just as players, but as part of our football family.
+
+We understand that things weren’t perfect. There were times when activity dropped, when communication could’ve been better, and maybe when we didn’t give everyone the playing time or attention they deserved. For that, we are genuinely sorry.
+
+Moving forward, we’re committed to improving. That means:
+
+• Scheduling more friendlies so everyone can stay active and enjoy the game
+• Not over-pinging, but still keeping communication clear and respectful
+• Making sure everyone gets fair playing time, because every player matters
+• And most importantly, never taking our teammates for granted again
+
+We’d love to see you back with us someday, but whether you return or not, please know that you were—and still are—valued and appreciated.
+
+https://discord.gg/QqTWBUkPCw
+
+With respect and gratitude,
+**The Agnello FC Team**\`;
+
+  try {
+    await member.send(dmText);
+  } catch (err) {
+    console.warn(\`Could not DM \${member.user.tag}\`);
+  }
+});
+
 // ✅ reaction on @everyone/@here
 client.on('messageCreate', async message => {
   if (message.mentions.everyone || message.content.includes('@everyone') || message.content.includes('@here')) {
@@ -93,19 +139,19 @@ client.on('messageCreate', async message => {
   const members = roleMention.members;
   const failed = [];
 
-  await message.reply(`Dming ${members.size} users...`);
+  await message.reply(\`Dming \${members.size} users...\`);
   for (const [_, member] of members) {
     if (DM_CACHE.has(member.id)) continue;
     try {
       await member.send(msgToSend);
       DM_CACHE.add(member.id);
     } catch {
-      failed.push(`<@${member.id}>`);
+      failed.push(\`<@\${member.id}>\`);
     }
   }
 
   if (failed.length) {
-    message.author.send(`Failed to DM:\n${failed.join('\n')}`);
+    message.author.send(\`Failed to DM:\n\${failed.join('\n')}\`);
   }
 });
 
@@ -116,8 +162,8 @@ client.on('messageCreate', async message => {
   const goal = args[1] || '40';
 
   const embed = new EmbedBuilder()
-    .setTitle(`#  <:RFL:1360413714175492246> - <:Palmont:1357102365697642697> | Agnello FC Activity Check`)
-    .setDescription(`**React with:** <:Palmont:1357102365697642697>\n\n**Goal:** ${goal}\n**Duration:** 1 Day`)
+    .setTitle('#  <:RFL:1360413714175492246> - <:Palmont:1357102365697642697> | Agnello FC Activity Check')
+    .setDescription(\`**React with:** <:Palmont:1357102365697642697>\n\n**Goal:** \${goal}\n**Duration:** 1 Day\`)
     .setColor('DarkBlue');
 
   const sent = await message.channel.send({ content: '@everyone', embeds: [embed] });
@@ -134,8 +180,8 @@ client.on('messageCreate', async message => {
   let claimed = {};
   let claimedUsers = new Set();
   const embed = new EmbedBuilder()
-    .setTitle(`**AGNELLO FC 7v7 FRIENDLY**`)
-    .setDescription(POSITIONS.map((pos, i) => `React ${POSITION_EMOJIS[i]} → ${pos}`).join('\n') + '\n@everyone')
+    .setTitle('**AGNELLO FC 7v7 FRIENDLY**')
+    .setDescription(POSITIONS.map((pos, i) => \`React \${POSITION_EMOJIS[i]} → \${pos}\`).join('\n') + '\n@everyone')
     .setColor('Green');
 
   const friendlyMsg = await message.channel.send({ embeds: [embed] });
@@ -146,7 +192,7 @@ client.on('messageCreate', async message => {
   collector.on('collect', async (reaction, user) => {
     if (user.bot) return;
 
-    await new Promise(r => setTimeout(r, 3000)); // wait 3 seconds
+    await new Promise(r => setTimeout(r, 3000));
     const existing = Object.values(claimed).find(u => u === user.id);
     if (existing) return;
 
@@ -158,36 +204,33 @@ client.on('messageCreate', async message => {
 
     const desc = POSITIONS.map((pos, i) => {
       const userId = claimed[POSITIONS[i]];
-      return `React ${POSITION_EMOJIS[i]} → ${pos}${userId ? ` - <@${userId}>` : ''}`;
+      return \`React \${POSITION_EMOJIS[i]} → \${pos}\${userId ? \` - <@\${userId}>\` : ''}\`;
     }).join('\n') + '\n@everyone';
 
     embed.setDescription(desc);
     await friendlyMsg.edit({ embeds: [embed] });
-    await message.channel.send(`✅ ${POSITIONS[index]} confirmed for <@${user.id}>`);
+    await message.channel.send(\`✅ \${POSITIONS[index]} confirmed for <@\${user.id}>\`);
 
     if (Object.keys(claimed).length === POSITIONS.length) {
       collector.stop();
-      const lineup = POSITIONS.map(pos => `${pos}: <@${claimed[pos]}>`).join('\n');
-      await message.channel.send(`**Final Lineup:**\n${lineup}`);
+      const lineup = POSITIONS.map(pos => \`\${pos}: <@\${claimed[pos]}>\`).join('\n');
+      await message.channel.send(\`**Final Lineup:**\n\${lineup}\`);
       await message.channel.send('Finding friendly, looking for a rob...');
     }
   });
 
-  // After 1 minute
   setTimeout(() => {
     if (Object.keys(claimed).length < 7) {
       message.channel.send('@everyone More reacts to get a friendly!');
     }
   }, 60 * 1000);
 
-  // After 10 minutes
   collector.on('end', () => {
     if (Object.keys(claimed).length < 7) {
       message.channel.send('❌ Friendly cancelled — not enough players.');
     }
   });
 
-  // Watch for Roblox link
   const robloxFilter = m => m.author.id === message.author.id && m.content.includes('roblox.com/games/');
   const linkCollector = message.channel.createMessageCollector({ filter: robloxFilter, time: 30 * 60 * 1000 });
 
@@ -196,7 +239,7 @@ client.on('messageCreate', async message => {
     for (const userId of players) {
       try {
         const user = await client.users.fetch(userId);
-        await user.send(`Here’s the friendly, join up: ${m.content}`);
+        await user.send(\`Here’s the friendly, join up: \${m.content}\`);
       } catch {}
     }
     linkCollector.stop();
@@ -204,7 +247,6 @@ client.on('messageCreate', async message => {
 });
 
 // MUSIC SYSTEM
-
 const queue = new Map();
 
 client.on('messageCreate', async message => {
@@ -230,6 +272,7 @@ client.on('messageCreate', async message => {
         textChannel: message.channel,
         voiceChannel,
         connection: null,
+        audioPlayer: null,
         songs: [],
         loop: false
       };
@@ -245,7 +288,10 @@ client.on('messageCreate', async message => {
           selfMute: false
         });
 
+        const player = createAudioPlayer();
         queueContruct.connection = connection;
+        queueContruct.audioPlayer = player;
+        connection.subscribe(player);
         playSong(message.guild.id, queueContruct.songs[0]);
       } catch (err) {
         console.error(err);
@@ -253,30 +299,34 @@ client.on('messageCreate', async message => {
       }
     } else {
       serverQueue.songs.push(song);
-      return message.channel.send(`${song.title} added to queue`);
+      return message.channel.send(\`\${song.title} added to queue\`);
     }
   }
 
   if (cmd === '!skip') {
-    if (!serverQueue) return;
-    serverQueue.connection.dispatcher.end();
+    if (serverQueue && serverQueue.audioPlayer) {
+      serverQueue.audioPlayer.stop();
+    }
   }
 
   if (cmd === '!stop') {
-    if (!serverQueue) return;
-    serverQueue.songs = [];
-    serverQueue.connection.dispatcher.end();
+    if (serverQueue) {
+      serverQueue.songs = [];
+      if (serverQueue.audioPlayer) {
+        serverQueue.audioPlayer.stop();
+      }
+    }
   }
 
   if (cmd === '!queue') {
     if (!serverQueue) return message.channel.send('No songs.');
-    return message.channel.send(serverQueue.songs.map((s, i) => `${i + 1}. ${s.title}`).join('\n'));
+    return message.channel.send(serverQueue.songs.map((s, i) => \`\${i + 1}. \${s.title}\`).join('\n'));
   }
 
   if (cmd === '!loop') {
     if (!serverQueue) return;
     serverQueue.loop = !serverQueue.loop;
-    message.channel.send(`Loop is now ${serverQueue.loop ? 'on' : 'off'}`);
+    message.channel.send(\`Loop is now \${serverQueue.loop ? 'on' : 'off'}\`);
   }
 });
 
@@ -289,11 +339,9 @@ async function playSong(guildId, song) {
 
   const stream = await play.stream(song.url);
   const resource = createAudioResource(stream.stream, { inputType: stream.type });
-  const player = createAudioPlayer();
-  player.play(resource);
-  serverQueue.connection.subscribe(player);
+  serverQueue.audioPlayer.play(resource);
 
-  player.on(AudioPlayerStatus.Idle, () => {
+  serverQueue.audioPlayer.once(AudioPlayerStatus.Idle, () => {
     if (!serverQueue.loop) serverQueue.songs.shift();
     playSong(guildId, serverQueue.songs[0]);
   });
