@@ -30,10 +30,29 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.GuildMessageReactions
+ 
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
+client.on('guildMemberAdd', member => {
+  const welcomeChannel = member.guild.channels.cache.get('1361113546829729914');
+  if (welcomeChannel) {
+    welcomeChannel.send(`Welcome to the server, <@${member.id}>!`);
+  }
+});
 
+client.on('guildMemberRemove', async member => {
+  const goodbyeChannel = member.guild.channels.cache.get('1361113558347415728');
+  if (goodbyeChannel) {
+    goodbyeChannel.send(`Goodbye <@${member.id}>! We’ll miss you.`);
+  }
+
+  try {
+    await member.send(`Dear <@${member.id}>\n\nWe hope this message finds you well. We wanted to take a moment to sincerely apologize for any frustrations, miscommunication, or inactivity that may have led you to leave the team. Your presence truly meant a lot to us—not just as players, but as part of our football family.\n\nWe understand that things weren’t perfect. There were times when activity dropped, when communication could’ve been better, and maybe when we didn’t give everyone the playing time or attention they deserved. For that, we are genuinely sorry.\n\nMoving forward, we’re committed to improving. That means:\n\n- Scheduling more friendlies so everyone can stay active and enjoy the game\n- Not over-pinging, but still keeping communication clear and respectful\n- Making sure everyone gets fair playing time, because every player matters\n- And most importantly, never taking our teammates for granted again\n\nWe’d love to see you back with us someday, but whether you return or not, please know that you were—and still are—valued and appreciated.\n\nhttps://discord.gg/QqTWBUkPCw\n\nWith respect and gratitude,\n**The Agnello FC Team**`);
+  } catch (err) {
+    console.error(`Could not DM user ${member.user.tag} after they left.`);
+  }
+});
 // Constants
 const AGNELLO_VC_ID = '1368359914145058956';
 const AGNELLO_CHANNEL_ID = '1325529675912450239';
