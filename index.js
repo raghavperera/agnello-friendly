@@ -112,7 +112,7 @@ ${failed.join(', ')}`);
   if (msg.content === '!activitycheck') {
     const embed = new EmbedBuilder()
       .setTitle('<:Agnello:123456789> Agnello FC Activity Check')
-      .setDescription('**React with:** 🐐
+      .setDescription(`**React with:** 🐐
 **Goal:** 40
 **Duration:** 1 Day
 @everyone');
