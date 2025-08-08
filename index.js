@@ -70,42 +70,111 @@ client.on('messageCreate', async message => {
 });
 
 // !hostfriendly command
+const positionEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
+const positionNames = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
+let ongoingHost = false;
+
 client.on('messageCreate', async message => {
-  if (message.content.toLowerCase().startsWith('!hostfriendly')) {
-    const msg = await message.channel.send(
-      `**AGNELLO FC 7v7 FRIENDLY**\nReact to claim a position:\n1️⃣ - GK\n2️⃣ - CB\n3️⃣ - CB2\n4️⃣ - CM\n5️⃣ - LW\n6️⃣ - RW\n7️⃣ - ST\n@everyone`
-    );
+  if (!message.content.startsWith('!hostfriendly') || message.author.bot) return;
 
-    const filter = (reaction, user) => !user.bot;
-    const collector = msg.createReactionCollector({ filter, time: 600000 });
-
-    msg.react('1️⃣');
-    msg.react('2️⃣');
-    msg.react('3️⃣');
-    msg.react('4️⃣');
-    msg.react('5️⃣');
-    msg.react('6️⃣');
-    msg.react('7️⃣');
-
-    let reactedUsers = new Set();
-
-    collector.on('collect', async (reaction, user) => {
-      if (!reactedUsers.has(user.id)) {
-        reactedUsers.add(user.id);
-        message.channel.send(`✅ ${reaction.emoji.name} confirmed for <@${user.id}>`);
-      } else {
-        reaction.users.remove(user.id);
-      }
-    });
-
-    collector.on('end', collected => {
-      if (reactedUsers.size < 7) {
-        message.channel.send('❌ Not enough players. Friendly cancelled.');
-      } else {
-        message.channel.send('✅ Positions confirmed. Finding friendly...');
-      }
-    });
+  if (ongoingHost) {
+    return message.reply('A friendly is already being hosted.');
   }
+
+  const allowedRoles = ['Admin', 'Friendlies Department'];
+  const hasPermission = message.member.roles.cache.some(role => allowedRoles.includes(role.name));
+  if (!hasPermission) return message.reply('You don’t have permission to host a friendly.');
+
+  ongoingHost = true;
+
+  const posMessage = await message.channel.send(
+    `**AGNELLO FC 7v7 FRIENDLY**\n` +
+    `React to claim a position:\n\n` +
+    `1️⃣ → GK\n2️⃣ → CB\n3️⃣ → CB2\n4️⃣ → CM\n5️⃣ → LW\n6️⃣ → RW\n7️⃣ → ST\n\n@everyone`
+  );
+
+  for (const emoji of positionEmojis) {
+    await posMessage.react(emoji);
+  }
+
+  const collectedReactions = {};
+  const claimedUsers = new Set();
+
+  const collector = posMessage.createReactionCollector({
+    filter: (reaction, user) => !user.bot && positionEmojis.includes(reaction.emoji.name),
+    time: 10 * 60 * 1000 // 10 minutes
+  });
+
+  collector.on('collect', async (reaction, user) => {
+    if (claimedUsers.has(user.id)) {
+      await reaction.users.remove(user.id); // Remove if user already claimed a spot
+      return;
+    }
+
+    const index = positionEmojis.indexOf(reaction.emoji.name);
+    if (!collectedReactions[index]) {
+      collectedReactions[index] = user;
+      claimedUsers.add(user.id);
+      message.channel.send(`✅ ${positionNames[index]}-<@${user.id}>`);
+
+      // All positions filled
+      if (Object.keys(collectedReactions).length === 7) {
+        collector.stop('filled');
+      }
+    } else {
+      await reaction.users.remove(user.id); // Position already taken
+    }
+  });
+
+  // 1 minute warning if not enough reacts
+  setTimeout(() => {
+    if (Object.keys(collectedReactions).length < 7) {
+      message.channel.send('@everyone more reacts to get a friendly.');
+    }
+  }, 60 * 1000);
+
+  collector.on('end', async (_, reason) => {
+    if (reason !== 'filled') {
+      if (Object.keys(collectedReactions).length < 7) {
+        await message.channel.send('❌ Friendly cancelled due to not enough players.');
+        ongoingHost = false;
+        return;
+      }
+    }
+
+    // Final lineup
+    let finalLineup = '**FRIENDLY LINEUP**\n';
+    for (let i = 0; i < positionEmojis.length; i++) {
+      const user = collectedReactions[i];
+      if (user) {
+        finalLineup += `${positionNames[i]} → <@${user.id}>\n`;
+      }
+    }
+    await message.channel.send(finalLineup);
+    await message.channel.send('✅ Finding friendly, looking for a link by a hoster.');
+
+    const userIdsToDM = Object.values(collectedReactions).map(user => user.id);
+
+    // Watch for link from host and DM everyone
+    const linkCollector = message.channel.createMessageCollector({
+      filter: msg => msg.author.id === message.author.id && msg.content.includes('http'),
+      time: 5 * 60 * 1000,
+      max: 1
+    });
+
+    linkCollector.on('collect', async msg => {
+      for (const userId of userIdsToDM) {
+        try {
+          const member = await message.guild.members.fetch(userId);
+          await member.send(`Here’s the friendly, join up: ${msg.content}`);
+        } catch (err) {
+          console.error(`Failed to DM ${userId}:`, err.message);
+        }
+      }
+    });
+
+    ongoingHost = false;
+  });
 });
 
 // !activitycheck command
@@ -115,12 +184,12 @@ client.on('messageCreate', async message => {
     const goal = parseInt(parts[1]) || 40;
     const embed = new EmbedBuilder()
       .setTitle('📋 Agnello FC Activity Check')
-      .setDescription(`React with 🟢 to confirm you're active!\n**Goal:** ${goal}\n**Duration:** 1 day\n@everyone`)
+      .setDescription(`React with ✅ to confirm you're active!\n**Goal:** ${goal}\n**Duration:** 1 day\n@everyone`)
       .setColor(0x00FF00)
       .setTimestamp();
 
     const activityMsg = await message.channel.send({ embeds: [embed] });
-    activityMsg.react('🟢');
+    activityMsg.react('✅');
   }
 });
 
