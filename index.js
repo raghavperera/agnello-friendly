@@ -8,22 +8,20 @@ import {
   joinVoiceChannel,
   createAudioPlayer,
   createAudioResource,
-  entersState,
-  VoiceConnectionStatus,
   AudioPlayerStatus
 } from '@discordjs/voice';
 import express from 'express';
 import ytdl from 'ytdl-core';
 import 'dotenv/config';
 
-// Bot client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages
   ],
   partials: [Partials.Channel]
 });
@@ -34,7 +32,7 @@ const welcomeChannelId = '1361113546829729914';
 const goodbyeChannelId = '1361113558347415728';
 const inviteLink = 'https://discord.gg/QqTWBUkPCw';
 
-// Welcome new members
+// WELCOME
 client.on('guildMemberAdd', async member => {
   try {
     await member.send(`👋 Welcome to the team, ${member.user.username}! Glad to have you with us. - mossedbyerts`);
@@ -45,7 +43,7 @@ client.on('guildMemberAdd', async member => {
   }
 });
 
-// Goodbye
+// GOODBYE
 client.on('guildMemberRemove', async member => {
   try {
     const channel = member.guild.channels.cache.get(goodbyeChannelId);
@@ -56,7 +54,7 @@ client.on('guildMemberRemove', async member => {
   }
 });
 
-// Auto join VC on ready
+// AUTO VC CONNECT
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   const channel = client.channels.cache.get(voiceChannelId);
@@ -70,7 +68,6 @@ client.once('ready', async () => {
   }
 });
 
-// Reconnect to VC if disconnected
 client.on('voiceStateUpdate', (oldState, newState) => {
   if (oldState.member.id === client.user.id && !newState.channelId) {
     const channel = client.channels.cache.get(voiceChannelId);
@@ -115,13 +112,14 @@ client.on('messageCreate', async message => {
   let claimed = Array(7).fill(null);
   let claimedUsers = new Set();
 
-  let lineupText = () => {
-    return `**AGNELLO FC 7v7 FRIENDLY**\n` +
-      positionEmojis.map((emoji, i) => `${emoji} → ${positionNames[i]}: ${claimed[i] ? `<@${claimed[i]}>` : '---'}`).join('\n') +
-      `\n\n@everyone`;
-  };
+  const buildLineup = () =>
+    `**AGNELLO FC 7v7 FRIENDLY**\n` +
+    positionEmojis.map((emoji, i) =>
+      `${emoji} → ${positionNames[i]}: ${claimed[i] ? `<@${claimed[i]}>` : '---'}`
+    ).join('\n') +
+    `\n\n@everyone`;
 
-  const msg = await message.channel.send(lineupText());
+  const msg = await message.channel.send(buildLineup());
   for (let emoji of positionEmojis) await msg.react(emoji);
 
   const collector = msg.createReactionCollector({
@@ -136,14 +134,15 @@ client.on('messageCreate', async message => {
     }
     const index = positionEmojis.indexOf(reaction.emoji.name);
     if (!claimed[index]) {
-      await new Promise(r => setTimeout(r, 3000)); // wait 3s to check for dupes
+      await new Promise(r => setTimeout(r, 3000));
       if (claimedUsers.has(user.id)) {
         await reaction.users.remove(user.id);
         return;
       }
       claimed[index] = user.id;
       claimedUsers.add(user.id);
-      await msg.edit(lineupText());
+      await msg.edit(buildLineup());
+      await message.channel.send(`✅ ${positionNames[index]} confirmed for <@${user.id}>`);
       if (claimed.every(c => c)) collector.stop('filled');
     } else {
       await reaction.users.remove(user.id);
@@ -186,10 +185,43 @@ client.on('messageCreate', async message => {
 client.on('messageCreate', async message => {
   if (message.content.startsWith('!activitycheck')) {
     const goal = parseInt(message.content.split(' ')[1]) || 40;
-    const embedMsg = await message.channel.send(
+    const msg = await message.channel.send(
       `# 📋 Agnello FC Activity Check\nReact with ✅ to confirm you're active!\n**Goal:** ${goal}\n**Duration:** 1 day\n@everyone`
     );
-    embedMsg.react('✅');
+    msg.react('✅');
+  }
+});
+
+// !dmrole
+client.on('messageCreate', async message => {
+  if (message.content.startsWith('!dmrole')) {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return message.reply('No permission.');
+    }
+    const roleName = message.content.split(' ').slice(1).join(' ');
+    if (!roleName) return message.reply('Specify a role.');
+    const role = message.guild.roles.cache.find(r => r.name === roleName);
+    if (!role) return message.reply('Role not found.');
+
+    message.reply(`📨 Dming role: ${role.name}...`);
+    const failed = [];
+    const sent = new Set();
+
+    for (const member of role.members.values()) {
+      if (sent.has(member.id)) continue;
+      sent.add(member.id);
+      try {
+        await member.send(`Hello from Agnello FC!`);
+      } catch {
+        failed.push(member.user.tag);
+      }
+    }
+
+    if (failed.length) {
+      message.author.send(`❌ Failed to DM:\n${failed.join('\n')}`);
+    } else {
+      message.author.send(`✅ All members in ${role.name} DMed successfully.`);
+    }
   }
 });
 
@@ -204,7 +236,6 @@ async function playSong(guild, song) {
   const stream = ytdl(song.url, { filter: 'audioonly' });
   const resource = createAudioResource(stream);
   serverQueue.audioPlayer.play(resource);
-
   serverQueue.audioPlayer.once(AudioPlayerStatus.Idle, () => {
     serverQueue.songs.shift();
     playSong(guild, serverQueue.songs[0]);
@@ -217,11 +248,11 @@ client.on('messageCreate', async message => {
   let serverQueue = queue.get(message.guild.id);
 
   if (message.content.startsWith('!play')) {
-    const voiceChannel = message.member.voice.channel;
-    if (!voiceChannel) return message.reply('Join a VC first!');
-    const permissions = voiceChannel.permissionsFor(message.client.user);
-    if (!permissions.has(PermissionsBitField.Flags.Connect) || !permissions.has(PermissionsBitField.Flags.Speak)) {
-      return message.reply('Missing permissions to join/speak.');
+    const vc = message.member.voice.channel;
+    if (!vc) return message.reply('Join a VC first!');
+    const perms = vc.permissionsFor(message.client.user);
+    if (!perms.has(PermissionsBitField.Flags.Connect) || !perms.has(PermissionsBitField.Flags.Speak)) {
+      return message.reply('No permission to join/speak.');
     }
     const songInfo = await ytdl.getInfo(args[1]);
     const song = { title: songInfo.videoDetails.title, url: songInfo.videoDetails.video_url };
@@ -229,7 +260,7 @@ client.on('messageCreate', async message => {
     if (!serverQueue) {
       const audioPlayer = createAudioPlayer();
       const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
+        channelId: vc.id,
         guildId: message.guild.id,
         adapterCreator: message.guild.voiceAdapterCreator
       });
@@ -258,7 +289,7 @@ client.on('messageCreate', async message => {
   }
 
   if (message.content.startsWith('!queue')) {
-    if (!serverQueue || !serverQueue.songs.length) return message.reply('Queue is empty!');
+    if (!serverQueue || !serverQueue.songs.length) return message.reply('Queue empty!');
     message.reply(`🎶 Queue:\n${serverQueue.songs.map((s, i) => `${i + 1}. ${s.title}`).join('\n')}`);
   }
 
@@ -269,7 +300,7 @@ client.on('messageCreate', async message => {
   }
 });
 
-// Express keep-alive
+// EXPRESS KEEP-ALIVE
 const app = express();
 app.get('/', (req, res) => res.send('Bot is alive'));
 app.listen(3000, () => console.log('Express server running'));
