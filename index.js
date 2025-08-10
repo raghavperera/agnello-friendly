@@ -6,8 +6,8 @@ import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs
 dotenv.config();
 
 const TOKEN = process.env.TOKEN;
-const GUILD_ID = '1357085245983162708';            // Replace with your server ID
-const VOICE_CHANNEL_ID = '1368359914145058956';   // Replace with your voice channel ID
+const GUILD_ID = '1357085245983162708';            // Your guild ID
+const VOICE_CHANNEL_ID = '1368359914145058956';    // Your voice channel ID
 
 if (!TOKEN) {
   console.error('Error: TOKEN is not set in environment variables.');
@@ -22,16 +22,16 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildVoiceStates,
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-// Positions for friendly
+// Positions & emojis
 const POSITIONS = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
 const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
 
 let friendlyMessage = null;
 let friendlyCollector = null;
-let claimedPositions = {};   // posIndex => userId
+let claimedPositions = {};
 let claimedUsers = new Set();
 let pingedEveryone = false;
 
@@ -88,7 +88,6 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (!message.guild) return;
 
-  // Auto react ✅ to @everyone or @here pings
   if (message.mentions.everyone) {
     message.react('✅').catch(() => {});
   }
@@ -99,7 +98,6 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(prefix.length).trim().split(/\s+/);
   const command = args.shift().toLowerCase();
 
-  // ----------- HOSTFRIENDLY COMMAND -----------
   if (command === 'hostfriendly') {
     if (friendlyMessage) {
       message.channel.send('A friendly is already being hosted. Please wait for it to finish.').catch(() => {});
@@ -120,18 +118,16 @@ client.on('messageCreate', async (message) => {
 
     friendlyMessage = await message.channel.send({ content: '@everyone', embeds: [embed] });
 
-    // Add reactions for positions
     for (const emoji of numberEmojis) {
       await friendlyMessage.react(emoji);
     }
 
-    // Create reaction collector for 10 minutes
     friendlyCollector = friendlyMessage.createReactionCollector({
       filter: (reaction, user) => !user.bot && numberEmojis.includes(reaction.emoji.name),
-      time: 10 * 60 * 1000, // 10 minutes
+      time: 10 * 60 * 1000,
+      dispose: true,
     });
 
-    // After 1 minute, ping @everyone if under 7 reacted
     setTimeout(async () => {
       if (!pingedEveryone && Object.keys(claimedPositions).length < POSITIONS.length) {
         await message.channel.send('@everyone More reacts to get a friendly!').catch(() => {});
@@ -141,7 +137,6 @@ client.on('messageCreate', async (message) => {
 
     friendlyCollector.on('collect', async (reaction, user) => {
       try {
-        // Remove user's other reactions to enforce one position
         const userReactions = friendlyMessage.reactions.cache.filter(r => r.users.cache.has(user.id));
         for (const r of userReactions.values()) {
           if (r.emoji.name !== reaction.emoji.name) {
@@ -153,25 +148,21 @@ client.on('messageCreate', async (message) => {
         if (posIndex === -1) return;
 
         if (claimedPositions[posIndex]) {
-          // Position already claimed
-          if (claimedPositions[posIndex] === user.id) return; // user already owns it
+          if (claimedPositions[posIndex] === user.id) return;
           reaction.users.remove(user.id).catch(() => {});
           message.channel.send(`${reaction.emoji} is already claimed by <@${claimedPositions[posIndex]}>.`).catch(() => {});
           return;
         }
 
         if (claimedUsers.has(user.id)) {
-          // User already claimed a position
           reaction.users.remove(user.id).catch(() => {});
           message.channel.send(`<@${user.id}>, you already claimed a position.`).catch(() => {});
           return;
         }
 
-        // Assign position to user
         claimedPositions[posIndex] = user.id;
         claimedUsers.add(user.id);
 
-        // Update embed description live
         const lines = POSITIONS.map((pos, i) => {
           const userId = claimedPositions[i];
           return `${numberEmojis[i]} → ${pos} : ${userId ? `<@${userId}>` : '_available_'}`;
@@ -181,7 +172,6 @@ client.on('messageCreate', async (message) => {
 
         message.channel.send(`✅ ${posIndex + 1}️⃣ ${POSITIONS[posIndex]} confirmed for <@${user.id}>`).catch(() => {});
 
-        // If all 7 claimed, stop collector
         if (Object.keys(claimedPositions).length === POSITIONS.length) {
           friendlyCollector.stop('full');
         }
@@ -198,7 +188,6 @@ client.on('messageCreate', async (message) => {
         await message.channel.send('Friendly cancelled due to not enough players.');
       }
 
-      // Reset
       friendlyMessage = null;
       friendlyCollector = null;
       claimedPositions = {};
@@ -209,14 +198,13 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ----------- DMROLE COMMAND -----------
   if (command === 'dmrole') {
     const role = message.mentions.roles.first();
     if (!role) {
       message.reply('Please mention a role to DM.').catch(() => {});
       return;
     }
-    args.shift(); // remove role mention
+    args.shift();
     const dmMessage = args.join(' ');
     if (!dmMessage) {
       message.reply('Please provide a message to send.').catch(() => {});
@@ -238,7 +226,6 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ----------- ACTIVITYCHECK COMMAND -----------
   if (command === 'activitycheck') {
     let goal = parseInt(args[0]);
     if (isNaN(goal) || goal < 1) goal = 40;
@@ -260,7 +247,6 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ----------- JOINVC COMMAND -----------
   if (command === 'joinvc') {
     try {
       const guild = await client.guilds.fetch(GUILD_ID);
@@ -306,7 +292,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Simple express server to keep alive
+// Simple express server to keep bot alive
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot is running!'));
