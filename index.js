@@ -48,14 +48,16 @@ const positionNames = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
 // Cache to avoid DMing same user twice in one run
 const dmSentCache = new Set();
 
+import { DisTube } from 'distube';
+import SpotifyPlugin from '@distube/spotify';
+
 // Distube music client
 const distube = new DisTube(client, {
   plugins: [new SpotifyPlugin()],
   leaveOnFinish: true,
   leaveOnStop: true,
   leaveOnEmpty: true,
-  youtubeDL: false,
-  updateYouTubeDL: false,
+  // Removed youtubeDL and updateYouTubeDL options
 });
 
 // ---- Helper functions ---- //
