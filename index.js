@@ -1,16 +1,7 @@
-import { 
-  Client, 
-  GatewayIntentBits, 
-  Partials, 
-  EmbedBuilder 
-} from 'discord.js';
+import { Client, GatewayIntentBits, Partials, EmbedBuilder } from 'discord.js';
 import dotenv from 'dotenv';
 import express from 'express';
-import { 
-  joinVoiceChannel, 
-  entersState, 
-  VoiceConnectionStatus 
-} from '@discordjs/voice';
+import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs/voice';
 
 dotenv.config();
 
@@ -20,20 +11,8 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-// === CONFIG ===
-const GUILD_ID = '1357085245983162708';            // <== REPLACE THIS with your guild/server ID as string
-const VOICE_CHANNEL_ID = '1368359914145058956';   // your voice channel ID (as string)
-
-// === GLOBALS ===
-let voiceConnection = null;
-let friendlyMessage = null;
-let friendlyCollector = null;
-
-const POSITIONS = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
-const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣'];
-
-let claimedPositions = {}; // pos index => user id
-let claimedUsers = new Set();
+const GUILD_ID = '1357085245983162708'; // Replace with your server ID
+const VOICE_CHANNEL_ID = '1368359914145058956'; // Your voice channel ID
 
 const client = new Client({
   intents: [
@@ -46,7 +25,15 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-// ======= FUNCTIONS =======
+const POSITIONS = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
+const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
+
+let voiceConnection = null;
+let friendlyMessage = null;
+let friendlyCollector = null;
+let claimedPositions = {};
+let claimedUsers = new Set();
+let pingedEveryone = false;
 
 async function tryAutoJoinVC() {
   try {
@@ -56,7 +43,7 @@ async function tryAutoJoinVC() {
       return;
     }
     const channel = guild.channels.cache.get(VOICE_CHANNEL_ID);
-    if (!channel || channel.type !== 2) { // 2 = voice channel
+    if (!channel || channel.type !== 2) { // voice channel = 2
       console.log('Voice channel not found or invalid.');
       return;
     }
@@ -69,13 +56,13 @@ async function tryAutoJoinVC() {
       selfDeaf: false,
     });
 
-    await entersState(voiceConnection, VoiceConnectionStatus.Ready, 20_000);
+    await entersState(voiceConnection, VoiceConnectionStatus.Ready, 20000);
 
     voiceConnection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
-          entersState(voiceConnection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5_000),
+          entersState(voiceConnection, VoiceConnectionStatus.Signalling, 5000),
+          entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5000),
         ]);
       } catch {
         voiceConnection.destroy();
@@ -89,8 +76,6 @@ async function tryAutoJoinVC() {
     console.error('Failed to auto join VC:', error);
   }
 }
-
-// ======= EVENTS =======
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -112,7 +97,6 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(prefix.length).trim().split(/\s+/);
   const command = args.shift().toLowerCase();
 
-  // ----- !hostfriendly -----
   if (command === 'hostfriendly') {
     if (friendlyMessage) {
       message.channel.send('A friendly is already being hosted. Please wait for it to finish.').catch(() => {});
@@ -120,7 +104,8 @@ client.on('messageCreate', async (message) => {
     }
 
     claimedPositions = {};
-    claimedUsers.clear();
+    claimedUsers = new Set();
+    pingedEveryone = false;
 
     const embed = new EmbedBuilder()
       .setTitle('AGNELLO FC 7v7 FRIENDLY')
@@ -130,22 +115,32 @@ client.on('messageCreate', async (message) => {
       )
       .setColor('Blue');
 
-    friendlyMessage = await message.channel.send({ embeds: [embed] });
+    friendlyMessage = await message.channel.send({ content: '@everyone', embeds: [embed] });
 
+    // Add reactions
     for (const emoji of numberEmojis) {
       await friendlyMessage.react(emoji);
     }
 
+    // Create reaction collector
     friendlyCollector = friendlyMessage.createReactionCollector({
       filter: (reaction, user) => !user.bot && numberEmojis.includes(reaction.emoji.name),
-      time: 10 * 60 * 1000 // 10 minutes
+      time: 10 * 60 * 1000, // 10 minutes
     });
+
+    // After 1 minute ping @everyone again if needed
+    setTimeout(async () => {
+      if (!pingedEveryone && Object.keys(claimedPositions).length < POSITIONS.length) {
+        await message.channel.send('@everyone More reacts to get a friendly!').catch(() => {});
+        pingedEveryone = true;
+      }
+    }, 60 * 1000);
 
     friendlyCollector.on('collect', async (reaction, user) => {
       try {
         // Remove other reactions by this user
-        const userReacts = friendlyMessage.reactions.cache.filter(r => r.users.cache.has(user.id));
-        for (const r of userReacts.values()) {
+        const userReactions = friendlyMessage.reactions.cache.filter(r => r.users.cache.has(user.id));
+        for (const r of userReactions.values()) {
           if (r.emoji.name !== reaction.emoji.name) {
             await r.users.remove(user.id).catch(() => {});
           }
@@ -199,12 +194,12 @@ client.on('messageCreate', async (message) => {
       friendlyCollector = null;
       claimedPositions = {};
       claimedUsers.clear();
+      pingedEveryone = false;
     });
 
     return;
   }
 
-  // ----- !dmrole -----
   if (command === 'dmrole') {
     const role = message.mentions.roles.first();
     if (!role) {
@@ -233,7 +228,6 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ----- !activitycheck -----
   if (command === 'activitycheck') {
     let goal = parseInt(args[0]);
     if (isNaN(goal) || goal < 1) goal = 40;
@@ -255,7 +249,6 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ----- !joinvc -----
   if (command === 'joinvc') {
     const guild = client.guilds.cache.get(GUILD_ID) || message.guild;
     if (!guild) {
@@ -278,14 +271,14 @@ client.on('messageCreate', async (message) => {
         selfDeaf: false,
       });
 
-      await entersState(voiceConnection, VoiceConnectionStatus.Ready, 20_000);
+      await entersState(voiceConnection, VoiceConnectionStatus.Ready, 20000);
       message.channel.send("Joined the voice channel and muted.").catch(() => {});
 
       voiceConnection.on(VoiceConnectionStatus.Disconnected, async () => {
         try {
           await Promise.race([
-            entersState(voiceConnection, VoiceConnectionStatus.Signalling, 5_000),
-            entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5_000),
+            entersState(voiceConnection, VoiceConnectionStatus.Signalling, 5000),
+            entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5000),
           ]);
         } catch {
           voiceConnection.destroy();
@@ -301,7 +294,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// === EXPRESS SERVER ===
+// Express server to keep bot alive (Render, Replit etc)
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot is running!'));
