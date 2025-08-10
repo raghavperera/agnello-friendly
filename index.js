@@ -1,5 +1,18 @@
-import { Client, GatewayIntentBits, Partials, EmbedBuilder, PermissionsBitField } from 'discord.js';
+import { 
+  Client, 
+  GatewayIntentBits, 
+  Partials, 
+  EmbedBuilder, 
+  PermissionsBitField 
+} from 'discord.js';
 import dotenv from 'dotenv';
+import express from 'express';
+import { 
+  joinVoiceChannel, 
+  entersState, 
+  VoiceConnectionStatus 
+} from '@discordjs/voice';
+
 dotenv.config();
 
 const TOKEN = process.env.TOKEN;
@@ -14,6 +27,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildVoiceStates,
   ],
   partials: [Partials.Channel],
 });
@@ -25,13 +39,28 @@ const POSITIONS = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
 let claimedPositions = {}; // position index (0-6) => userId
 let claimedUsers = new Set();
 
+// --- Globals for voice connection ---
+let voiceConnection = null;
+const VOICE_CHANNEL_ID = '1368359914145058956'; // your VC ID here
+const GUILD_ID = 'your-guild-id-here'; // replace with your guild ID
+
+// Helper: Number emojis for reactions
+const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣'];
+
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
+  tryAutoJoinVC();
 });
 
+// ========== Command handling ===========
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (!message.guild) return;
+
+  // Auto-react with ✅ if @everyone or @here mentioned
+  if (message.mentions.everyone) {
+    message.react('✅').catch(() => {});
+  }
 
   const prefix = '!';
   if (!message.content.startsWith(prefix)) return;
@@ -39,66 +68,57 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(prefix.length).trim().split(/\s+/);
   const command = args.shift().toLowerCase();
 
-  // ===== !hostfriendly =====
+  // ---- !hostfriendly ----
   if (command === 'hostfriendly') {
     if (friendlyMessage) {
       message.channel.send('A friendly is already being hosted. Please wait until it finishes.').catch(console.error);
       return;
     }
 
-    // Reset tracking
     claimedPositions = {};
     claimedUsers.clear();
 
-    // Send the embed listing positions with instructions
     const embed = new EmbedBuilder()
       .setTitle('AGNELLO FC 7v7 FRIENDLY')
       .setDescription(
-        POSITIONS.map((pos, i) => `${numberEmoji(i + 1)} → ${pos}`).join('\n') + '\n\n' +
-        'React to claim your position. Only one position per user.'
+        POSITIONS.map((pos, i) => `${numberEmojis[i]} → ${pos} : _available_`).join('\n') + 
+        '\n\nReact to claim your position. Only one position per user.'
       )
       .setColor('Blue');
 
     friendlyMessage = await message.channel.send({ embeds: [embed] });
 
-    // Add reaction emojis 1️⃣ to 7️⃣
-    for (let i = 0; i < POSITIONS.length; i++) {
-      await friendlyMessage.react(numberEmoji(i + 1));
+    // React with number emojis 1️⃣ to 7️⃣
+    for (const emoji of numberEmojis) {
+      await friendlyMessage.react(emoji);
     }
 
-    // Create a reaction collector to handle position claiming
     friendlyCollector = friendlyMessage.createReactionCollector({
-      filter: (reaction, user) => !user.bot && numberEmojiRange().includes(reaction.emoji.name),
-      time: 10 * 60 * 1000, // 10 minutes
+      filter: (reaction, user) => !user.bot && numberEmojis.includes(reaction.emoji.name),
+      time: 10 * 60 * 1000 // 10 minutes
     });
 
     friendlyCollector.on('collect', async (reaction, user) => {
       try {
-        // Remove other reactions from this user if any
-        const userReactions = friendlyMessage.reactions.cache.filter(r => r.users.cache.has(user.id));
-        for (const r of userReactions.values()) {
+        // Remove other reactions by user
+        const userReacts = friendlyMessage.reactions.cache.filter(r => r.users.cache.has(user.id));
+        for (const r of userReacts.values()) {
           if (r.emoji.name !== reaction.emoji.name) {
             await r.users.remove(user.id);
           }
         }
 
-        const posIndex = numberEmojiIndex(reaction.emoji.name);
+        const posIndex = numberEmojis.indexOf(reaction.emoji.name);
         if (posIndex === -1) return;
 
-        // Check if position already claimed
         if (claimedPositions[posIndex]) {
-          if (claimedPositions[posIndex] === user.id) {
-            // Already claimed by this user, do nothing
-            return;
-          } else {
-            // Position taken by someone else, remove user's reaction
-            reaction.users.remove(user.id).catch(() => {});
-            message.channel.send(`${reaction.emoji} is already claimed by <@${claimedPositions[posIndex]}>.`).catch(() => {});
-            return;
-          }
+          if (claimedPositions[posIndex] === user.id) return; // Already claimed by user
+          // Position taken by someone else, remove user's reaction
+          reaction.users.remove(user.id).catch(() => {});
+          message.channel.send(`${reaction.emoji} is already claimed by <@${claimedPositions[posIndex]}>.`).catch(() => {});
+          return;
         }
 
-        // Check if user already claimed a different position
         if (claimedUsers.has(user.id)) {
           reaction.users.remove(user.id).catch(() => {});
           message.channel.send(`<@${user.id}>, you already claimed a position.`).catch(() => {});
@@ -109,34 +129,32 @@ client.on('messageCreate', async (message) => {
         claimedPositions[posIndex] = user.id;
         claimedUsers.add(user.id);
 
-        // Update embed with claimed users
+        // Update embed description
         const lines = POSITIONS.map((pos, i) => {
           const userId = claimedPositions[i];
-          return `${numberEmoji(i + 1)} → ${pos} : ${userId ? `<@${userId}>` : '_available_'}`;
+          return `${numberEmojis[i]} → ${pos} : ${userId ? `<@${userId}>` : '_available_'}`;
         });
         embed.setDescription(lines.join('\n') + '\n\nReact to claim your position. Only one position per user.');
         await friendlyMessage.edit({ embeds: [embed] });
 
         message.channel.send(`✅ ${posIndex + 1}️⃣ ${POSITIONS[posIndex]} confirmed for <@${user.id}>`).catch(() => {});
 
-        // Check if all positions filled - end early
+        // End early if full
         if (Object.keys(claimedPositions).length === POSITIONS.length) {
           friendlyCollector.stop('full');
         }
       } catch (err) {
-        console.error('Error processing reaction:', err);
+        console.error('Error handling friendly reaction:', err);
       }
     });
 
     friendlyCollector.on('end', async (_, reason) => {
-      // Final lineup or cancellation
       if (Object.keys(claimedPositions).length === POSITIONS.length) {
         const lineup = POSITIONS.map((pos, i) => `${pos}: <@${claimedPositions[i]}>`).join('\n');
-        await message.channel.send(`**Friendly lineup confirmed:**\n${lineup}\n\nWaiting for host to post the friendly link...`);
+        await message.channel.send(`**Friendly lineup confirmed:**\n${lineup}\n\nWaiting for the host to post the friendly link...`);
       } else {
         await message.channel.send('Friendly cancelled due to not enough players.');
       }
-      // Clean up
       friendlyMessage = null;
       friendlyCollector = null;
       claimedPositions = {};
@@ -146,75 +164,110 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ===== !dmrole =====
+  // ---- !dmrole @Role Your message ----
   if (command === 'dmrole') {
     const role = message.mentions.roles.first();
     if (!role) {
       message.reply('Please mention a role to DM.').catch(console.error);
       return;
     }
-    args.shift(); // Remove role mention
+    args.shift(); // remove role mention from args
     const dmMessage = args.join(' ');
     if (!dmMessage) {
       message.reply('Please provide a message to send.').catch(console.error);
       return;
     }
 
-    let successCount = 0;
-    let failCount = 0;
-    for (const [memberId, member] of role.members) {
+    let success = 0;
+    let failed = 0;
+    for (const member of role.members.values()) {
       try {
         await member.send(dmMessage);
-        successCount++;
+        success++;
       } catch {
-        failCount++;
+        failed++;
       }
     }
-    message.channel.send(`Sent message to ${successCount} members. Failed to DM ${failCount} members.`).catch(console.error);
+
+    message.channel.send(`Sent message to ${success} members. Failed to DM ${failed} members.`).catch(console.error);
     return;
   }
 
-  // ===== !activitycheck =====
+  // ---- !activitycheck [goal] [durationHours] ----
   if (command === 'activitycheck') {
-    // Usage: !activitycheck <goal> <durationHours>
-    // Defaults:
     let goal = parseInt(args[0]);
     if (isNaN(goal) || goal < 1) goal = 40;
-    let durationHours = parseInt(args[1]);
-    if (isNaN(durationHours) || durationHours < 1) durationHours = 24;
+    let duration = parseInt(args[1]);
+    if (isNaN(duration) || duration < 1) duration = 24;
 
     const embed = new EmbedBuilder()
       .setTitle('🏆 Agnello FC Activity Check')
-      .setDescription(`React with ✅ to join the activity check!`)
+      .setDescription('React with ✅ to join the activity check!')
       .addFields(
         { name: 'Goal', value: `${goal}`, inline: true },
-        { name: 'Duration', value: `${durationHours} hour(s)`, inline: true }
+        { name: 'Duration', value: `${duration} hour(s)`, inline: true }
       )
       .setColor('Green')
       .setFooter({ text: 'React to this message!' });
 
     const activityMessage = await message.channel.send({ content: '@everyone', embeds: [embed] });
     await activityMessage.react('✅');
-
-    // Optional: You can create a reaction collector here for tracking if you want
-
     return;
   }
 
-  // Other commands ignored
+  // ---- !joinvc ----
+  if (command === 'joinvc') {
+    const guild = client.guilds.cache.get(GUILD_ID) || message.guild;
+    if (!guild) {
+      message.channel.send("Guild not found.").catch(console.error);
+      return;
+    }
+
+    const voiceChannel = guild.channels.cache.get(VOICE_CHANNEL_ID);
+    if (!voiceChannel || voiceChannel.type !== 2) { // type 2 = voice channel in discord.js v14
+      message.channel.send("Voice channel not found or invalid.").catch(console.error);
+      return;
+    }
+
+    try {
+      voiceConnection = joinVoiceChannel({
+        channelId: VOICE_CHANNEL_ID,
+        guildId: guild.id,
+        adapterCreator: guild.voiceAdapterCreator,
+        selfMute: true,
+        selfDeaf: false,
+      });
+
+      // Wait for connection to be ready
+      await entersState(voiceConnection, VoiceConnectionStatus.Ready, 20_000);
+      message.channel.send("Joined the voice channel and muted.").catch(console.error);
+
+      // Handle disconnects and auto reconnect
+      voiceConnection.on(VoiceConnectionStatus.Disconnected, async () => {
+        try {
+          await Promise.race([
+            entersState(voiceConnection, VoiceConnectionStatus.Signalling, 5_000),
+            entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5_000),
+          ]);
+          // reconnect successful
+        } catch {
+          voiceConnection.destroy();
+          voiceConnection = null;
+          console.log("Voice connection destroyed after failed reconnect.");
+        }
+      });
+    } catch (err) {
+      console.error('Error joining voice channel:', err);
+      message.channel.send('Failed to join voice channel.').catch(console.error);
+    }
+    return;
+  }
 });
 
-client.login(TOKEN);
+// --- Express server for hosting platforms ---
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('Bot is running!'));
+app.listen(PORT, () => console.log(`Express server listening on port ${PORT}`));
 
-// Helpers for number emojis
-function numberEmoji(number) {
-  const map = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣'];
-  return map[number - 1] || '';
-}
-function numberEmojiRange() {
-  return ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣'];
-}
-function numberEmojiIndex(emoji) {
-  const map = {'1️⃣':0,'2️⃣':1,'3️⃣':2,'4️⃣':3,'5️⃣':4,'6️⃣':5,'7️⃣':6};
-  return map[emoji] ?? -1;
-}
+client.login(TOKEN);
