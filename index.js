@@ -19,7 +19,7 @@ import {
 } from '@discordjs/voice';
 import express from 'express';
 import ytdl from 'ytdl-core';
-import DisTube from 'distube';
+import { DisTube } from 'distube';
 import { SpotifyPlugin } from '@distube/spotify';
 import 'dotenv/config';
 
