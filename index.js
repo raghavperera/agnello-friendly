@@ -1,3 +1,4 @@
+node --check index.js
 import {
   Client,
   GatewayIntentBits,
