@@ -1,170 +1,220 @@
-import { Client, GatewayIntentBits, Partials, EmbedBuilder } from 'discord.js';
-import { DisTube } from 'distube';
-import { SpotifyPlugin } from '@distube/spotify';
-import { YtDlpPlugin } from '@distube/yt-dlp';
+import { Client, GatewayIntentBits, Partials, EmbedBuilder, PermissionsBitField } from 'discord.js';
 import dotenv from 'dotenv';
+dotenv.config();
 
-dotenv.config(); // Load environment variables (e.g., TOKEN from .env)
-
-// Ensure the bot token is provided
 const TOKEN = process.env.TOKEN;
 if (!TOKEN) {
-    console.error("Error: Discord bot token is not set in the environment (TOKEN).");
-    process.exit(1);
+  console.error("Error: TOKEN not set in environment.");
+  process.exit(1);
 }
 
-// Create a new Discord client with necessary intents
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,            // guild information
-        GatewayIntentBits.GuildMessages,     // text messages
-        GatewayIntentBits.GuildVoiceStates,  // voice channel data
-        GatewayIntentBits.GuildMembers,      // for join/leave and role members
-        GatewayIntentBits.MessageContent     // to read message content
-    ],
-    partials: [Partials.Channel]             // for DMs or partial data
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+  ],
+  partials: [Partials.Channel],
 });
 
-// Initialize DisTube with Spotify and YouTube (via yt-dlp) support
-const distube = new DisTube(client, {
-    plugins: [
-        new SpotifyPlugin(),              // enable Spotify links [oai_citation:6‡npmjs.com](https://www.npmjs.com/package/@distube/spotify#:~:text=const%20,new%20SpotifyPlugin%28%29%5D%2C)
-        new YtDlpPlugin({ update: true }) // enable YouTube/others via yt-dlp [oai_citation:7‡npmjs.com](https://www.npmjs.com/package/@distube/yt-dlp#:~:text=import%20,dlp)
-    ]
-});
+// --- Globals for friendly hoster ---
+let friendlyMessage = null;
+let friendlyCollector = null;
+const POSITIONS = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
+let claimedPositions = {}; // position index (0-6) => userId
+let claimedUsers = new Set();
 
-// When the bot is ready
 client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag}`);
+  console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Send an embed log when a member joins
-client.on('guildMemberAdd', member => {
-    const joinEmbed = new EmbedBuilder()
-        .setTitle('Member Joined')
-        .setColor('Green')
-        .setDescription(`${member.user.tag} has joined the server.`)
-        .addFields(
-            { name: 'Account Created', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: false },
-            { name: 'Member Count', value: `${member.guild.memberCount}`, inline: false }
-        )
-        .setThumbnail(member.user.displayAvatarURL({ size: 1024 }));
-    const logChannel = member.guild.systemChannel;
-    if (logChannel) {
-        logChannel.send({ embeds: [joinEmbed] }).catch(console.error);
-    }
-});
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!message.guild) return;
 
-// Send an embed log when a member leaves
-client.on('guildMemberRemove', member => {
-    const leaveEmbed = new EmbedBuilder()
-        .setTitle('Member Left')
-        .setColor('Red')
-        .setDescription(`${member.user.tag} has left the server.`)
-        .addFields(
-            { name: 'Account Created', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: false },
-            { name: 'Member Count', value: `${member.guild.memberCount}`, inline: false }
-        )
-        .setThumbnail(member.user.displayAvatarURL({ size: 1024 }));
-    const logChannel = member.guild.systemChannel;
-    if (logChannel) {
-        logChannel.send({ embeds: [leaveEmbed] }).catch(console.error);
-    }
-});
+  const prefix = '!';
+  if (!message.content.startsWith(prefix)) return;
 
-// Handle messages for commands and auto-reactions
-client.on('messageCreate', message => {
-    // Ignore bot messages and non-guild messages
-    if (message.author.bot || !message.guild) return;
+  const args = message.content.slice(prefix.length).trim().split(/\s+/);
+  const command = args.shift().toLowerCase();
 
-    // Auto-react with ✅ if @everyone or @here is mentioned
-    if (message.mentions.everyone) {
-        message.react('✅').catch(console.error);
+  // ===== !hostfriendly =====
+  if (command === 'hostfriendly') {
+    if (friendlyMessage) {
+      message.channel.send('A friendly is already being hosted. Please wait until it finishes.').catch(console.error);
+      return;
     }
 
-    // Use '!' as the command prefix
-    const prefix = '!';
-    if (!message.content.startsWith(prefix)) return;
-    const args = message.content.slice(prefix.length).trim().split(/\s+/);
-    const command = args.shift().toLowerCase();
+    // Reset tracking
+    claimedPositions = {};
+    claimedUsers.clear();
 
-    // Music commands using DisTube
-    if (command === 'play') {
-        const query = args.join(' ');
-        const voiceChannel = message.member.voice.channel;
-        if (!voiceChannel) {
-            message.reply('You need to join a voice channel first!').catch(console.error);
-            return;
+    // Send the embed listing positions with instructions
+    const embed = new EmbedBuilder()
+      .setTitle('AGNELLO FC 7v7 FRIENDLY')
+      .setDescription(
+        POSITIONS.map((pos, i) => `${numberEmoji(i + 1)} → ${pos}`).join('\n') + '\n\n' +
+        'React to claim your position. Only one position per user.'
+      )
+      .setColor('Blue');
+
+    friendlyMessage = await message.channel.send({ embeds: [embed] });
+
+    // Add reaction emojis 1️⃣ to 7️⃣
+    for (let i = 0; i < POSITIONS.length; i++) {
+      await friendlyMessage.react(numberEmoji(i + 1));
+    }
+
+    // Create a reaction collector to handle position claiming
+    friendlyCollector = friendlyMessage.createReactionCollector({
+      filter: (reaction, user) => !user.bot && numberEmojiRange().includes(reaction.emoji.name),
+      time: 10 * 60 * 1000, // 10 minutes
+    });
+
+    friendlyCollector.on('collect', async (reaction, user) => {
+      try {
+        // Remove other reactions from this user if any
+        const userReactions = friendlyMessage.reactions.cache.filter(r => r.users.cache.has(user.id));
+        for (const r of userReactions.values()) {
+          if (r.emoji.name !== reaction.emoji.name) {
+            await r.users.remove(user.id);
+          }
         }
-        // Play the song/query in the user's voice channel
-        distube.play(voiceChannel, query, {
-            textChannel: message.channel,
-            member: message.member
-        }).catch(err => {
-            console.error(err);
-            message.reply(`Error playing: ${err.message}`).catch(console.error);
+
+        const posIndex = numberEmojiIndex(reaction.emoji.name);
+        if (posIndex === -1) return;
+
+        // Check if position already claimed
+        if (claimedPositions[posIndex]) {
+          if (claimedPositions[posIndex] === user.id) {
+            // Already claimed by this user, do nothing
+            return;
+          } else {
+            // Position taken by someone else, remove user's reaction
+            reaction.users.remove(user.id).catch(() => {});
+            message.channel.send(`${reaction.emoji} is already claimed by <@${claimedPositions[posIndex]}>.`).catch(() => {});
+            return;
+          }
+        }
+
+        // Check if user already claimed a different position
+        if (claimedUsers.has(user.id)) {
+          reaction.users.remove(user.id).catch(() => {});
+          message.channel.send(`<@${user.id}>, you already claimed a position.`).catch(() => {});
+          return;
+        }
+
+        // Assign position
+        claimedPositions[posIndex] = user.id;
+        claimedUsers.add(user.id);
+
+        // Update embed with claimed users
+        const lines = POSITIONS.map((pos, i) => {
+          const userId = claimedPositions[i];
+          return `${numberEmoji(i + 1)} → ${pos} : ${userId ? `<@${userId}>` : '_available_'}`;
         });
-    }
-    else if (command === 'skip') {
-        const queue = distube.getQueue(message);
-        if (!queue) {
-            message.reply('Nothing is playing right now.').catch(console.error);
-        } else {
-            // Skip the current song
-            distube.skip(message)
-                .then(() => message.channel.send('⏭ Skipped the song.'))
-                .catch(err => {
-                    console.error(err);
-                    message.reply(`Could not skip: ${err.message}`).catch(console.error);
-                });
+        embed.setDescription(lines.join('\n') + '\n\nReact to claim your position. Only one position per user.');
+        await friendlyMessage.edit({ embeds: [embed] });
+
+        message.channel.send(`✅ ${posIndex + 1}️⃣ ${POSITIONS[posIndex]} confirmed for <@${user.id}>`).catch(() => {});
+
+        // Check if all positions filled - end early
+        if (Object.keys(claimedPositions).length === POSITIONS.length) {
+          friendlyCollector.stop('full');
         }
+      } catch (err) {
+        console.error('Error processing reaction:', err);
+      }
+    });
+
+    friendlyCollector.on('end', async (_, reason) => {
+      // Final lineup or cancellation
+      if (Object.keys(claimedPositions).length === POSITIONS.length) {
+        const lineup = POSITIONS.map((pos, i) => `${pos}: <@${claimedPositions[i]}>`).join('\n');
+        await message.channel.send(`**Friendly lineup confirmed:**\n${lineup}\n\nWaiting for host to post the friendly link...`);
+      } else {
+        await message.channel.send('Friendly cancelled due to not enough players.');
+      }
+      // Clean up
+      friendlyMessage = null;
+      friendlyCollector = null;
+      claimedPositions = {};
+      claimedUsers.clear();
+    });
+
+    return;
+  }
+
+  // ===== !dmrole =====
+  if (command === 'dmrole') {
+    const role = message.mentions.roles.first();
+    if (!role) {
+      message.reply('Please mention a role to DM.').catch(console.error);
+      return;
     }
-    else if (command === 'stop') {
-        const queue = distube.getQueue(message);
-        if (!queue) {
-            message.reply('Nothing is playing to stop.').catch(console.error);
-        } else {
-            // Stop playback and clear the queue
-            distube.stop(message);
-            message.channel.send('🛑 Stopped the music and cleared the queue.').catch(console.error);
-        }
+    args.shift(); // Remove role mention
+    const dmMessage = args.join(' ');
+    if (!dmMessage) {
+      message.reply('Please provide a message to send.').catch(console.error);
+      return;
     }
-    else if (command === 'loop') {
-        const queue = distube.getQueue(message);
-        if (!queue) {
-            message.reply('Nothing is playing to loop.').catch(console.error);
-        } else {
-            // Toggle repeat mode (Off, this song, all queue)
-            const mode = distube.setRepeatMode(message); // 0,1,2 [oai_citation:8‡npmjs.com](https://www.npmjs.com/package/distube/v/1.3.3#:~:text=,play%20mode)
-            const modes = ['Off', 'This Song', 'All Queue'];
-            message.channel.send(`🔁 Loop mode set to: **${modes[mode]}**`).catch(console.error);
-        }
+
+    let successCount = 0;
+    let failCount = 0;
+    for (const [memberId, member] of role.members) {
+      try {
+        await member.send(dmMessage);
+        successCount++;
+      } catch {
+        failCount++;
+      }
     }
-    // Command to DM all members of a mentioned role
-    else if (command === 'dmrole') {
-        // Format: !dmrole @Role Your message here
-        const role = message.mentions.roles.first();
-        if (!role) {
-            message.reply('Please mention a role to DM.').catch(console.error);
-            return;
-        }
-        // Remove the role mention from args and join the rest as the message
-        args.shift(); // Remove role arg
-        const dmMessage = args.join(' ');
-        if (!dmMessage) {
-            message.reply('Please include a message to send to the role members.').catch(console.error);
-            return;
-        }
-        // DM each member of the role
-        role.members.forEach(member => {
-            member.send(dmMessage).catch(err => {
-                // Ignore if user has DMs disabled or blocks the bot
-                console.error(`Could not DM ${member.user.tag}: ${err.message}`);
-            });
-        });
-        message.channel.send(`✉️ Sent a DM to all members of ${role.name}.`).catch(console.error);
-    }
+    message.channel.send(`Sent message to ${successCount} members. Failed to DM ${failCount} members.`).catch(console.error);
+    return;
+  }
+
+  // ===== !activitycheck =====
+  if (command === 'activitycheck') {
+    // Usage: !activitycheck <goal> <durationHours>
+    // Defaults:
+    let goal = parseInt(args[0]);
+    if (isNaN(goal) || goal < 1) goal = 40;
+    let durationHours = parseInt(args[1]);
+    if (isNaN(durationHours) || durationHours < 1) durationHours = 24;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 Agnello FC Activity Check')
+      .setDescription(`React with ✅ to join the activity check!`)
+      .addFields(
+        { name: 'Goal', value: `${goal}`, inline: true },
+        { name: 'Duration', value: `${durationHours} hour(s)`, inline: true }
+      )
+      .setColor('Green')
+      .setFooter({ text: 'React to this message!' });
+
+    const activityMessage = await message.channel.send({ content: '@everyone', embeds: [embed] });
+    await activityMessage.react('✅');
+
+    // Optional: You can create a reaction collector here for tracking if you want
+
+    return;
+  }
+
+  // Other commands ignored
 });
 
-// Log in to Discord (secure token from environment) [oai_citation:9‡npmjs.com](https://www.npmjs.com/package/distube/v/1.3.3#:~:text=prefix%3A%20,)
-client.login(TOKEN).catch(console.error);
+client.login(TOKEN);
+
+// Helpers for number emojis
+function numberEmoji(number) {
+  const map = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣'];
+  return map[number - 1] || '';
+}
+function numberEmojiRange() {
+  return ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣'];
+}
+function numberEmojiIndex(emoji) {
+  const map = {'1️⃣':0,'2️⃣':1,'3️⃣':2,'4️⃣':3,'5️⃣':4,'6️⃣':5,'7️⃣':6};
+  return map[emoji] ?? -1;
+}
