@@ -1,441 +1,369 @@
-
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  PermissionsBitField,
-  EmbedBuilder,
-  MessageReaction,
-  User,
-  ActivityType
+import { 
+  Client, 
+  GatewayIntentBits, 
+  Partials, 
+  EmbedBuilder, 
+  PermissionsBitField, 
+  Events, 
+  REST, 
+  Routes, 
+  SlashCommandBuilder 
 } from 'discord.js';
-import {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  entersState,
-  VoiceConnectionStatus
-} from '@discordjs/voice';
-import express from 'express';
-import ytdl from 'ytdl-core';
+import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs/voice';
 import { DisTube } from 'distube';
-import { SpotifyPlugin } from '@distube/spotify';
+import express from 'express';
 import 'dotenv/config';
 
-// ---- Config & Constants ---- //
+// Environment variables
+const TOKEN = process.env.DISCORD_TOKEN;
+const PORT = process.env.PORT || 3000;
+const VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID || '1368359914145058956'; // replace with your VC ID
+const GUILD_ID = process.env.GUILD_ID || ''; // For slash commands registration (optional)
+
+// Client setup
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.DirectMessages,
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
+  partials: [Partials.Channel],
 });
 
-const VOICE_CHANNEL_ID = '1368359914145058956'; // Agnello FC voice channel ID
-const WELCOME_CHANNEL_ID = '1361113546829729914'; // Welcome channel ID
-const GOODBYE_CHANNEL_ID = '1361113558347415728'; // Goodbye channel ID
-const SERVER_INVITE_LINK = 'https://discord.gg/QqTWBUkPCw'; // Server invite link
-
-// Position emojis & names for hostfriendly
-const positionEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
-const positionNames = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
-
-// Cache to avoid DMing same user twice in one run
-const dmSentCache = new Set();
-
-import { DisTube } from 'distube';
-import SpotifyPlugin from '@distube/spotify';
-
-// Distube music client
+// DisTube music setup
 const distube = new DisTube(client, {
-  plugins: [new SpotifyPlugin()],
-  leaveOnFinish: true,
   leaveOnStop: true,
+  emitNewSongOnly: true,
   leaveOnEmpty: true,
-  // Removed youtubeDL and updateYouTubeDL options
 });
 
-// ---- Helper functions ---- //
+// Express server for uptime
+const app = express();
+app.get('/', (req, res) => res.send('Agnello FC Bot is running!'));
+app.listen(PORT, () => console.log(`Express server listening on port ${PORT}`));
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// ======= Global variables & caches =======
+let joinVCConnection = null;
+const dmFailLog = new Map(); // command user ID => array of failed DMs
+const dmRoleCache = new Set(); // user IDs already DM'd in dmrole to avoid repeats
+const hostFriendlyActive = new Map(); // guildId => { message, collector, positions, usersReacted, timeoutIds }
+
+// Position emojis and roles mapping
+const positions = [
+  { emoji: '1️⃣', role: 'GK', slot: 0 },
+  { emoji: '2️⃣', role: 'CB', slot: 1 },
+  { emoji: '3️⃣', role: 'CB2', slot: 2 },
+  { emoji: '4️⃣', role: 'CM', slot: 3 },
+  { emoji: '5️⃣', role: 'LW', slot: 4 },
+  { emoji: '6️⃣', role: 'RW', slot: 5 },
+  { emoji: '7️⃣', role: 'ST', slot: 6 },
+];
+
+// Allowed roles for hosting friendlies
+const HOST_ROLES = ['Admin', 'Friendlies Department'];
+
+// Utility function to check if member can host
+function canHost(member) {
+  return member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+    HOST_ROLES.some(roleName => member.roles.cache.some(r => r.name === roleName));
 }
 
-async function safeSendDM(member, content) {
-  if (!member || !member.user || dmSentCache.has(member.id)) return false;
-  try {
-    await member.send(content);
-    dmSentCache.add(member.id);
-    return true;
-  } catch {
-    return false;
-  }
+// === Helper: Compose Host Friendly embed message ===
+function createFriendlyEmbed(claims) {
+  const embed = new EmbedBuilder()
+    .setTitle('AGNELLO FC 7v7 FRIENDLY')
+    .setDescription(positions.map((pos, i) => {
+      const userTag = claims[i] ? `<@${claims[i]}>` : '_Available_';
+      return `${pos.emoji} → **${pos.role}**: ${userTag}`;
+    }).join('\n'))
+    .setColor('#0099ff');
+  return embed;
 }
 
-// ---- Bot Events ---- //
+// === Helper: Send final lineup text ===
+function createLineupText(claims) {
+  return `**FINAL LINEUP:**\n` + positions.map((pos, i) => {
+    return `${pos.role}: <@${claims[i]}>`;
+  }).join('\n');
+}
 
-// Bot ready
-client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}`);
-
-  // Auto join voice channel and mute self
-  const channel = client.channels.cache.get(VOICE_CHANNEL_ID);
-  if (channel?.isVoiceBased()) {
-    joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator,
-      selfMute: true,
-    });
-    console.log('Auto-joined voice channel');
+// === !hostfriendly command logic ===
+async function handleHostFriendly(message) {
+  if (!canHost(message.member)) {
+    return message.reply("You don't have permission to host a friendly.");
   }
 
-  client.user.setActivity('Agnello FC | !help', { type: ActivityType.Playing });
-});
+  if (hostFriendlyActive.has(message.guild.id)) {
+    return message.reply("A friendly is already being hosted in this server.");
+  }
 
-// Reconnect to VC if disconnected unexpectedly
-client.on('voiceStateUpdate', (oldState, newState) => {
-  if (
-    oldState.member?.id === client.user.id &&
-    !newState.channelId
-  ) {
-    const channel = client.channels.cache.get(VOICE_CHANNEL_ID);
-    if (channel?.isVoiceBased()) {
-      joinVoiceChannel({
-        channelId: channel.id,
-        guildId: channel.guild.id,
-        adapterCreator: channel.guild.voiceAdapterCreator,
-        selfMute: true,
-      });
-      console.log('Reconnected to voice channel after disconnect');
+  // Initial claims array to store user IDs per position
+  const claims = Array(7).fill(null);
+
+  // Send embed message
+  const embed = createFriendlyEmbed(claims);
+  const friendlyMessage = await message.channel.send({ embeds: [embed], content: '@everyone React 1️⃣ to 7️⃣ to claim your position!' });
+
+  // React with all position emojis
+  for (const pos of positions) {
+    await friendlyMessage.react(pos.emoji);
+  }
+
+  // Track users who reacted (to prevent multi-pos)
+  const usersReacted = new Map(); // userId -> position index
+
+  // Create Reaction Collector
+  const filter = (reaction, user) => {
+    return positions.some(pos => pos.emoji === reaction.emoji.name) && !user.bot;
+  };
+
+  const collector = friendlyMessage.createReactionCollector({ filter, time: 10 * 60 * 1000 }); // 10 minutes
+
+  // Timeout functions
+  const pingTimeout = setTimeout(() => {
+    if (usersReacted.size < 7) {
+      message.channel.send('@here Friendly still looking for players, react to claim your position!');
+    }
+  }, 60 * 1000); // 1 minute
+
+  const cancelTimeout = setTimeout(() => {
+    if (usersReacted.size < 7) {
+      message.channel.send('Friendly cancelled due to insufficient players.');
+      collector.stop('cancelled');
+    }
+  }, 10 * 60 * 1000); // 10 minutes
+
+  collector.on('collect', async (reaction, user) => {
+    // Only one position per user allowed
+    if (usersReacted.has(user.id)) {
+      // Remove their new reaction if trying to claim a second position
+      try {
+        await reaction.users.remove(user.id);
+      } catch {}
+      return;
+    }
+
+    // Find which position this reaction corresponds to
+    const posIndex = positions.findIndex(p => p.emoji === reaction.emoji.name);
+    if (posIndex === -1) return;
+
+    // Check if position already claimed
+    if (claims[posIndex]) {
+      // Remove reaction because position taken
+      try {
+        await reaction.users.remove(user.id);
+      } catch {}
+      return;
+    }
+
+    // Assign position
+    claims[posIndex] = user.id;
+    usersReacted.set(user.id, posIndex);
+
+    // Edit embed to update lineup
+    const newEmbed = createFriendlyEmbed(claims);
+    await friendlyMessage.edit({ embeds: [newEmbed] });
+
+    // Confirm message
+    message.channel.send(`✅ **${positions[posIndex].role}** confirmed for <@${user.id}>`);
+
+    // If all positions filled - end collector early
+    if (usersReacted.size === 7) {
+      clearTimeout(pingTimeout);
+      clearTimeout(cancelTimeout);
+      collector.stop('filled');
+    }
+  });
+
+  collector.on('remove', async (reaction, user) => {
+    // When user removes reaction, free up position
+    if (!usersReacted.has(user.id)) return;
+    const posIndex = usersReacted.get(user.id);
+
+    // Remove claim & user react record
+    claims[posIndex] = null;
+    usersReacted.delete(user.id);
+
+    // Update embed
+    const newEmbed = createFriendlyEmbed(claims);
+    await friendlyMessage.edit({ embeds: [newEmbed] });
+
+    message.channel.send(`❌ <@${user.id}> has unclaimed position **${positions[posIndex].role}**.`);
+  });
+
+  collector.on('end', (collected, reason) => {
+    hostFriendlyActive.delete(message.guild.id);
+    if (reason === 'filled') {
+      message.channel.send(createLineupText(claims));
+      message.channel.send('Friendly is ready! Waiting for the host to post the invite link.');
+    } else if (reason === 'cancelled') {
+      // already notified cancel in timeout
+    } else {
+      message.channel.send('Friendly ended.');
+    }
+  });
+
+  // Store active friendly state
+  hostFriendlyActive.set(message.guild.id, {
+    message: friendlyMessage,
+    collector,
+    claims,
+    usersReacted,
+    pingTimeout,
+    cancelTimeout,
+  });
+}
+
+// === DM Role command (prefix and slash) ===
+async function handleDmRole(message, args) {
+  if (!canHost(message.member)) {
+    return message.reply("You don't have permission to use this command.");
+  }
+
+  const roleName = args.join(' ');
+  if (!roleName) return message.reply('Please specify a role name.');
+
+  const role = message.guild.roles.cache.find(r => r.name === roleName);
+  if (!role) return message.reply('Role not found.');
+
+  const failedUsers = [];
+  dmRoleCache.clear();
+
+  await message.channel.send(`Dming all users with the role **${role.name}**...`);
+
+  for (const member of role.members.values()) {
+    if (dmRoleCache.has(member.id)) continue;
+    try {
+      await member.send('Here is a message for your role!');
+      dmRoleCache.add(member.id);
+    } catch {
+      failedUsers.push(member.user.tag);
     }
   }
-});
 
-// Welcome DM & channel message
-client.on('guildMemberAdd', async (member) => {
-  await safeSendDM(
-    member,
-    `👋 Welcome to the team, ${member.user.username}! Glad to have you with us. - Agnello FC`
-  );
-  const channel = member.guild.channels.cache.get(WELCOME_CHANNEL_ID);
-  if (channel)
-    channel.send(`Welcome <@${member.id}> to **Agnello FC**! 🎉`);
-});
-
-// Goodbye DM & channel message
-client.on('guildMemberRemove', async (member) => {
-  const channel = member.guild.channels.cache.get(GOODBYE_CHANNEL_ID);
-  if (channel)
-    channel.send(`😢 ${member.user.tag} has left **Agnello FC**.`);
-  await safeSendDM(
-    member,
-    `We're sorry to see you go, ${member.user.username}. If you ever want to return, here's the invite: ${SERVER_INVITE_LINK}`
-  );
-});
-
-// React ✅ to any @everyone or @here mentions in messages
-client.on('messageCreate', async (message) => {
-  if (
-    message.mentions.everyone &&
-    !message.author.bot &&
-    message.channel
-  ) {
-    try {
-      await message.react('✅');
-    } catch {}
+  if (failedUsers.length > 0) {
+    await message.author.send(`Failed to DM the following users:\n${failedUsers.join('\n')}`);
   }
-});
 
-// ---- Commands ---- //
+  await message.channel.send('DMing complete.');
+}
 
+// === JoinVC command ===
+async function joinVoiceChannelHandler(message) {
+  if (!canHost(message.member)) return message.reply("You don't have permission.");
+
+  try {
+    const channel = message.guild.channels.cache.get(VOICE_CHANNEL_ID);
+    if (!channel || channel.type !== 2) return message.reply('Voice channel not found or invalid.');
+
+    joinVCConnection = joinVoiceChannel({
+      channelId: VOICE_CHANNEL_ID,
+      guildId: message.guild.id,
+      adapterCreator: message.guild.voiceAdapterCreator,
+      selfMute: true,
+      selfDeaf: false,
+    });
+
+    // Wait until connected
+    await entersState(joinVCConnection, VoiceConnectionStatus.Ready, 30_000);
+
+    message.reply('Joined voice channel and muted.');
+
+    // Reconnect logic if disconnected
+    joinVCConnection.on('stateChange', (oldState, newState) => {
+      if (newState.status === VoiceConnectionStatus.Disconnected) {
+        // Attempt reconnect
+        joinVCConnection.destroy();
+        setTimeout(() => {
+          joinVoiceChannel({
+            channelId: VOICE_CHANNEL_ID,
+            guildId: message.guild.id,
+            adapterCreator: message.guild.voiceAdapterCreator,
+            selfMute: true,
+            selfDeaf: false,
+          });
+        }, 5000);
+      }
+    });
+
+  } catch (err) {
+    console.error(err);
+    message.reply('Failed to join voice channel.');
+  }
+}
+
+// === Music command handlers ===
 client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guild) return;
+  if (message.author.bot) return;
+
+  if (!message.guild) return;
 
   const prefix = '!';
+
   if (!message.content.startsWith(prefix)) return;
 
   const args = message.content.slice(prefix.length).trim().split(/ +/);
-  const cmd = args.shift().toLowerCase();
+  const command = args.shift().toLowerCase();
 
-  // -- !joinvc -- //
-  if (cmd === 'joinvc') {
-    const channel = message.guild.channels.cache.get(VOICE_CHANNEL_ID);
-    if (!channel?.isVoiceBased()) {
-      return message.reply('Voice channel not found.');
-    }
-    try {
-      joinVoiceChannel({
-        channelId: channel.id,
-        guildId: channel.guild.id,
-        adapterCreator: channel.guild.voiceAdapterCreator,
-        selfMute: true,
-      });
-      return message.reply('✅ Joined voice channel and muted.');
-    } catch (e) {
-      console.error(e);
-      return message.reply('❌ Failed to join voice channel.');
-    }
+  // === Host Friendly ===
+  if (command === 'hostfriendly') {
+    return handleHostFriendly(message);
   }
 
-  // -- !dmrole ROLE_NAME -- //
-  if (cmd === 'dmrole') {
-    if (
-      !message.member.permissions.has(
-        PermissionsBitField.Flags.Administrator
-      )
-    ) {
-      return message.reply('❌ You do not have permission to use this.');
-    }
-    const roleName = args.join(' ');
-    if (!roleName) return message.reply('❌ Please specify a role name.');
+  // === DM Role ===
+  if (command === 'dmrole') {
+    return handleDmRole(message, args);
+  }
 
-    const role = message.guild.roles.cache.find(
-      (r) => r.name.toLowerCase() === roleName.toLowerCase()
-    );
-    if (!role) return message.reply('❌ Role not found.');
+  // === JoinVC ===
+  if (command === 'joinvc') {
+    return joinVoiceChannelHandler(message);
+  }
 
-    await message.reply(`📨 Sending DMs to role: **${role.name}**...`);
-    const failed = [];
-    for (const member of role.members.values()) {
-      if (dmSentCache.has(member.id)) continue;
-      try {
-        await member.send(`Hello from **Agnello FC**!`);
-        dmSentCache.add(member.id);
-      } catch {
-        failed.push(member.user.tag);
-      }
-    }
-    if (failed.length) {
-      await message.author.send(
-        `❌ Failed to DM the following users:\n${failed.join('\n')}`
-      );
-    } else {
-      await message.author.send(
-        `✅ Successfully sent DMs to all members of **${role.name}**.`
-      );
+  // === Music commands ===
+  if (command === 'play') {
+    if (!args.length) return message.reply('Please provide a song name or URL.');
+    try {
+      await distube.play(message.member.voice.channel, args.join(' '), { textChannel: message.channel, member: message.member });
+    } catch (err) {
+      message.reply('Error playing the song.');
+      console.error(err);
     }
     return;
   }
 
-  // -- !hostfriendly -- //
-  if (cmd === 'hostfriendly') {
-    // Check permission: Admin or Friendlies Department
-    const allowedRoles = ['Admin', 'Friendlies Department'];
-    const hasPerm = message.member.roles.cache.some((r) =>
-      allowedRoles.includes(r.name)
-    );
-    if (!hasPerm) {
-      return message.reply('❌ You do not have permission to host a friendly.');
-    }
-
-    let claimed = Array(7).fill(null);
-    let claimedUsers = new Set();
-
-    const buildLineupEmbed = () => {
-      const embed = new EmbedBuilder()
-        .setTitle('AGNELLO FC 7v7 FRIENDLY')
-        .setDescription(
-          positionEmojis
-            .map(
-              (emoji, i) =>
-                `${emoji} → **${positionNames[i]}**: ${
-                  claimed[i] ? `<@${claimed[i]}>` : '---'
-                }`
-            )
-            .join('\n') + '\n\n@here'
-        )
-        .setColor('#0066CC')
-        .setFooter({ text: 'React to claim your position. One position per user.' })
-        .setTimestamp();
-      return embed;
-    };
-
-    const friendlyMessage = await message.channel.send({
-      embeds: [buildLineupEmbed()],
-    });
-
-    for (const emoji of positionEmojis) {
-      await friendlyMessage.react(emoji);
-    }
-
-    const filter = (reaction, user) =>
-      !user.bot && positionEmojis.includes(reaction.emoji.name);
-
-    const collector = friendlyMessage.createReactionCollector({
-      filter,
-      time: 10 * 60 * 1000,
-    });
-
-    // Ping @here after 1 minute if fewer than 7 claimed
-    const oneMinPing = setTimeout(() => {
-      if (claimed.filter(Boolean).length < 7) {
-        message.channel.send('@here More reacts to get a friendly!');
-      }
-    }, 60 * 1000);
-
-    collector.on('collect', async (reaction, user) => {
-      // If user already claimed a position, remove new reaction
-      if (claimedUsers.has(user.id)) {
-        await reaction.users.remove(user.id).catch(() => {});
-        return;
-      }
-
-      const index = positionEmojis.indexOf(reaction.emoji.name);
-      if (!claimed[index]) {
-        // Wait 3 sec before assigning to check for duplicates
-        await delay(3000);
-        if (claimedUsers.has(user.id)) {
-          await reaction.users.remove(user.id).catch(() => {});
-          return;
-        }
-        claimed[index] = user.id;
-        claimedUsers.add(user.id);
-
-        // Edit lineup embed live
-        await friendlyMessage.edit({ embeds: [buildLineupEmbed()] });
-        await message.channel.send(`✅ ${positionNames[index]} confirmed for <@${user.id}>`);
-
-        // Stop if all claimed
-        if (claimed.every(Boolean)) {
-          collector.stop('filled');
-        }
-      } else {
-        await reaction.users.remove(user.id).catch(() => {});
-      }
-    });
-
-    collector.on('end', async (_, reason) => {
-      clearTimeout(oneMinPing);
-
-      if (reason !== 'filled' && claimed.filter(Boolean).length < 7) {
-        await message.channel.send('❌ Friendly cancelled due to not enough players.');
-        return;
-      }
-
-      // Show final lineup plain text
-      let finalLineup = '**FRIENDLY LINEUP**\n' +
-        claimed.map((id, i) => `${positionNames[i]} → <@${id}>`).join('\n');
-
-      await message.channel.send(finalLineup);
-      await message.channel.send('✅ Finding friendly, waiting for host link...');
-
-      // Wait for host to post link and DM players
-      const userIds = claimed.filter(Boolean);
-
-      const linkCollector = message.channel.createMessageCollector({
-        filter: (m) => m.author.id === message.author.id && m.content.includes('http'),
-        max: 1,
-        time: 5 * 60 * 1000,
-      });
-
-      linkCollector.on('collect', async (m) => {
-        for (const uid of userIds) {
-          try {
-            const member = await message.guild.members.fetch(uid);
-            await safeSendDM(member, `Here’s the friendly, join up: ${m.content}`);
-          } catch {}
-        }
-      });
-    });
-
-    return;
-  }
-
-  // -- !activitycheck [goal] -- //
-  if (cmd === 'activitycheck') {
-    let goal = parseInt(args[0], 10);
-    if (isNaN(goal) || goal < 1) goal = 40;
-
-    const embed = new EmbedBuilder()
-      .setTitle('📋 Agnello FC Activity Check')
-      .setDescription(
-        `React with ✅ to confirm you're active!\n**Goal:** ${goal}\n**Duration:** 1 day\n@everyone`
-      )
-      .setColor('#00AAFF')
-      .setTimestamp();
-
-    const activityMsg = await message.channel.send({ content: '@everyone', embeds: [embed] });
-    await activityMsg.react('✅');
-    return;
-  }
-
-  // ---- MUSIC COMMANDS (using DisTube) ---- //
-
-  if (cmd === 'play') {
-    const voiceChannel = message.member.voice.channel;
-    if (!voiceChannel) return message.reply('❌ You need to join a voice channel first.');
-
+  if (command === 'skip') {
     try {
-      await distube.play(voiceChannel, args.join(' '), {
-        member: message.member,
-        textChannel: message.channel,
-      });
-      return;
-    } catch (e) {
-      console.error(e);
-      return message.reply('❌ Failed to play the song.');
-    }
-  }
-
-  if (cmd === 'skip') {
-    try {
-      await distube.skip(message);
-      return message.reply('⏭ Skipped the song!');
+      const queue = distube.getQueue(message);
+      if (!queue) return message.reply('Nothing to skip.');
+      queue.skip();
+      message.reply('Skipped the song.');
     } catch {
-      return message.reply('❌ Nothing to skip.');
+      message.reply('Error skipping song.');
     }
+    return;
   }
 
-  if (cmd === 'stop') {
+  if (command === 'stop') {
     try {
-      await distube.stop(message);
-      return message.reply('🛑 Stopped and left the voice channel.');
+      const queue = distube.getQueue(message);
+      if (!queue) return message.reply('Nothing to stop.');
+      queue.stop();
+      message.reply('Stopped the music.');
     } catch {
-      return message.reply('❌ Nothing to stop.');
+      message.reply('Error stopping music.');
     }
+    return;
   }
 
-  if (cmd === 'queue') {
+  if (command === 'queue') {
     const queue = distube.getQueue(message);
-    if (!queue) return message.reply('❌ Queue is empty.');
-    const q = queue.songs.map((song, i) => `${i + 1}. ${song.name}`).join('\n');
-    return message.reply(`🎶 Queue:\n${q}`);
+    if (!queue) return message.reply('No songs in queue.');
+    message.channel.send(`Queue:\n${queue.songs.map((song, i) => `${i+1}. ${song.name} - ${song.formattedDuration}`).join('\n')}`);
+    return;
   }
 
-  if (cmd === 'loop') {
-    const queue = distube.getQueue(message);
-    if (!queue) return message.reply('❌ No song playing.');
-    let mode = queue.repeatMode;
-    mode = (mode + 1) % 3; // 0: off, 1: song, 2: queue
-    queue.setRepeatMode(mode);
-    return message.reply(`🔁 Loop mode is now: ${['Off', 'Song', 'Queue'][mode]}`);
-  }
-});
-
-// ---- Distube Events for feedback ---- //
-distube
-  .on('playSong', (queue, song) =>
-    queue.textChannel.send(`🎶 Playing: **${song.name}** - \`${song.formattedDuration}\``)
-  )
-  .on('addSong', (queue, song) =>
-    queue.textChannel.send(`✅ Added to queue: **${song.name}** - \`${song.formattedDuration}\``)
-  )
-  .on('error', (channel, e) => {
-    if (channel) channel.send(`❌ Error: ${e.toString().slice(0, 1974)}`);
-    else console.error(e);
-  });
-
-// ---- Express keep-alive server ---- //
-const app = express();
-app.get('/', (req, res) => res.send('Agnello FC Bot is alive.'));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
-
-// ---- Login ---- //
-client.login(process.env.TOKEN);
+  if (command === 'loop')
