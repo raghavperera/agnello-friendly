@@ -1,18 +1,24 @@
 {
-  "name": "agnello-fc-bot",
+  "name": "agnello-bot",
   "version": "1.0.0",
-  "description": "Agnello FC Discord bot with hostfriendly, dmrole, joinvc, music commands, welcome/goodbye DMs, and more.",
+  "description": "Discord bot for Agnello FC with music, friendly hosting, and role DMs",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "@discordjs/voice": "^0.17.0",
-    "@distube/spotify": "^1.5.1",
-    "discord.js": "^14.16.3",
-    "distube": "^5.0.4",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.1"
-  }
+    "@discordjs/voice": "^0.14.0",
+    "discord.js": "^14.11.0",
+    "distube": "^4.1.0",
+    "@distube/spotify": "^1.0.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "ytdl-core": "^4.11.1"
+  },
+  "author": "Your Name",
+  "license": "MIT"
 }
