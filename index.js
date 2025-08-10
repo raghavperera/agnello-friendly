@@ -6,13 +6,13 @@ import { joinVoiceChannel, entersState, VoiceConnectionStatus } from '@discordjs
 dotenv.config();
 
 const TOKEN = process.env.TOKEN;
+const GUILD_ID = '1357085245983162708';            // Replace with your server ID
+const VOICE_CHANNEL_ID = '1368359914145058956';   // Replace with your voice channel ID
+
 if (!TOKEN) {
-  console.error("Error: TOKEN not set in environment.");
+  console.error('Error: TOKEN is not set in environment variables.');
   process.exit(1);
 }
-
-const GUILD_ID = '1357085245983162708'; // Replace with your server ID
-const VOICE_CHANNEL_ID = '1368359914145058956'; // Your voice channel ID
 
 const client = new Client({
   intents: [
@@ -25,26 +25,28 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+// Positions for friendly
 const POSITIONS = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
 const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
 
-let voiceConnection = null;
 let friendlyMessage = null;
 let friendlyCollector = null;
-let claimedPositions = {};
+let claimedPositions = {};   // posIndex => userId
 let claimedUsers = new Set();
 let pingedEveryone = false;
 
+let voiceConnection = null;
+
 async function tryAutoJoinVC() {
   try {
-    const guild = client.guilds.cache.get(GUILD_ID);
+    const guild = await client.guilds.fetch(GUILD_ID);
     if (!guild) {
-      console.log('Guild not found for auto join.');
+      console.log('Guild not found.');
       return;
     }
-    const channel = guild.channels.cache.get(VOICE_CHANNEL_ID);
-    if (!channel || channel.type !== 2) { // voice channel = 2
-      console.log('Voice channel not found or invalid.');
+    const channel = await guild.channels.fetch(VOICE_CHANNEL_ID);
+    if (!channel || channel.type !== 2) {
+      console.log('Voice channel not found or not a voice channel.');
       return;
     }
 
@@ -67,13 +69,13 @@ async function tryAutoJoinVC() {
       } catch {
         voiceConnection.destroy();
         voiceConnection = null;
-        console.log("Voice connection destroyed after failed reconnect.");
+        console.log('Voice connection destroyed after failed reconnect.');
       }
     });
 
-    console.log('Auto joined voice channel successfully.');
+    console.log('Bot auto-joined voice channel.');
   } catch (error) {
-    console.error('Failed to auto join VC:', error);
+    console.error('Error in tryAutoJoinVC:', error);
   }
 }
 
@@ -86,7 +88,7 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (!message.guild) return;
 
-  // Auto react ✅ to @everyone or @here
+  // Auto react ✅ to @everyone or @here pings
   if (message.mentions.everyone) {
     message.react('✅').catch(() => {});
   }
@@ -97,6 +99,7 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(prefix.length).trim().split(/\s+/);
   const command = args.shift().toLowerCase();
 
+  // ----------- HOSTFRIENDLY COMMAND -----------
   if (command === 'hostfriendly') {
     if (friendlyMessage) {
       message.channel.send('A friendly is already being hosted. Please wait for it to finish.').catch(() => {});
@@ -110,25 +113,25 @@ client.on('messageCreate', async (message) => {
     const embed = new EmbedBuilder()
       .setTitle('AGNELLO FC 7v7 FRIENDLY')
       .setDescription(
-        POSITIONS.map((pos, i) => `${numberEmojis[i]} → ${pos} : _available_`).join('\n') + 
+        POSITIONS.map((pos, i) => `${numberEmojis[i]} → ${pos} : _available_`).join('\n') +
         '\n\nReact to claim your position. Only one position per user.'
       )
       .setColor('Blue');
 
     friendlyMessage = await message.channel.send({ content: '@everyone', embeds: [embed] });
 
-    // Add reactions
+    // Add reactions for positions
     for (const emoji of numberEmojis) {
       await friendlyMessage.react(emoji);
     }
 
-    // Create reaction collector
+    // Create reaction collector for 10 minutes
     friendlyCollector = friendlyMessage.createReactionCollector({
       filter: (reaction, user) => !user.bot && numberEmojis.includes(reaction.emoji.name),
       time: 10 * 60 * 1000, // 10 minutes
     });
 
-    // After 1 minute ping @everyone again if needed
+    // After 1 minute, ping @everyone if under 7 reacted
     setTimeout(async () => {
       if (!pingedEveryone && Object.keys(claimedPositions).length < POSITIONS.length) {
         await message.channel.send('@everyone More reacts to get a friendly!').catch(() => {});
@@ -138,7 +141,7 @@ client.on('messageCreate', async (message) => {
 
     friendlyCollector.on('collect', async (reaction, user) => {
       try {
-        // Remove other reactions by this user
+        // Remove user's other reactions to enforce one position
         const userReactions = friendlyMessage.reactions.cache.filter(r => r.users.cache.has(user.id));
         for (const r of userReactions.values()) {
           if (r.emoji.name !== reaction.emoji.name) {
@@ -150,22 +153,25 @@ client.on('messageCreate', async (message) => {
         if (posIndex === -1) return;
 
         if (claimedPositions[posIndex]) {
-          if (claimedPositions[posIndex] === user.id) return; // already claimed by user
+          // Position already claimed
+          if (claimedPositions[posIndex] === user.id) return; // user already owns it
           reaction.users.remove(user.id).catch(() => {});
           message.channel.send(`${reaction.emoji} is already claimed by <@${claimedPositions[posIndex]}>.`).catch(() => {});
           return;
         }
 
         if (claimedUsers.has(user.id)) {
+          // User already claimed a position
           reaction.users.remove(user.id).catch(() => {});
           message.channel.send(`<@${user.id}>, you already claimed a position.`).catch(() => {});
           return;
         }
 
-        // Assign position
+        // Assign position to user
         claimedPositions[posIndex] = user.id;
         claimedUsers.add(user.id);
 
+        // Update embed description live
         const lines = POSITIONS.map((pos, i) => {
           const userId = claimedPositions[i];
           return `${numberEmojis[i]} → ${pos} : ${userId ? `<@${userId}>` : '_available_'}`;
@@ -175,11 +181,12 @@ client.on('messageCreate', async (message) => {
 
         message.channel.send(`✅ ${posIndex + 1}️⃣ ${POSITIONS[posIndex]} confirmed for <@${user.id}>`).catch(() => {});
 
+        // If all 7 claimed, stop collector
         if (Object.keys(claimedPositions).length === POSITIONS.length) {
           friendlyCollector.stop('full');
         }
-      } catch (err) {
-        console.error('Friendly reaction handler error:', err);
+      } catch (error) {
+        console.error('Error handling friendly reaction:', error);
       }
     });
 
@@ -190,6 +197,8 @@ client.on('messageCreate', async (message) => {
       } else {
         await message.channel.send('Friendly cancelled due to not enough players.');
       }
+
+      // Reset
       friendlyMessage = null;
       friendlyCollector = null;
       claimedPositions = {};
@@ -200,6 +209,7 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // ----------- DMROLE COMMAND -----------
   if (command === 'dmrole') {
     const role = message.mentions.roles.first();
     if (!role) {
@@ -228,6 +238,7 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // ----------- ACTIVITYCHECK COMMAND -----------
   if (command === 'activitycheck') {
     let goal = parseInt(args[0]);
     if (isNaN(goal) || goal < 1) goal = 40;
@@ -249,20 +260,21 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // ----------- JOINVC COMMAND -----------
   if (command === 'joinvc') {
-    const guild = client.guilds.cache.get(GUILD_ID) || message.guild;
-    if (!guild) {
-      message.channel.send("Guild not found.").catch(() => {});
-      return;
-    }
-
-    const voiceChannel = guild.channels.cache.get(VOICE_CHANNEL_ID);
-    if (!voiceChannel || voiceChannel.type !== 2) {
-      message.channel.send("Voice channel not found or invalid.").catch(() => {});
-      return;
-    }
-
     try {
+      const guild = await client.guilds.fetch(GUILD_ID);
+      if (!guild) {
+        message.channel.send('Guild not found.').catch(() => {});
+        return;
+      }
+
+      const channel = await guild.channels.fetch(VOICE_CHANNEL_ID);
+      if (!channel || channel.type !== 2) {
+        message.channel.send('Voice channel not found or invalid.').catch(() => {});
+        return;
+      }
+
       voiceConnection = joinVoiceChannel({
         channelId: VOICE_CHANNEL_ID,
         guildId: guild.id,
@@ -272,7 +284,7 @@ client.on('messageCreate', async (message) => {
       });
 
       await entersState(voiceConnection, VoiceConnectionStatus.Ready, 20000);
-      message.channel.send("Joined the voice channel and muted.").catch(() => {});
+      message.channel.send('Joined the voice channel and muted.').catch(() => {});
 
       voiceConnection.on(VoiceConnectionStatus.Disconnected, async () => {
         try {
@@ -283,18 +295,18 @@ client.on('messageCreate', async (message) => {
         } catch {
           voiceConnection.destroy();
           voiceConnection = null;
-          console.log("Voice connection destroyed after failed reconnect.");
+          console.log('Voice connection destroyed after failed reconnect.');
         }
       });
-    } catch (err) {
-      console.error('Error joining voice channel:', err);
+    } catch (error) {
+      console.error('Error joining voice channel:', error);
       message.channel.send('Failed to join voice channel.').catch(() => {});
     }
     return;
   }
 });
 
-// Express server to keep bot alive (Render, Replit etc)
+// Simple express server to keep alive
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot is running!'));
