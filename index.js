@@ -21,7 +21,7 @@ if (!TOKEN) {
 }
 
 // === CONFIG ===
-const GUILD_ID = 'YOUR_GUILD_ID_HERE';            // <== REPLACE THIS with your guild/server ID as string
+const GUILD_ID = '1357085245983162708';            // <== REPLACE THIS with your guild/server ID as string
 const VOICE_CHANNEL_ID = '1368359914145058956';   // your voice channel ID (as string)
 
 // === GLOBALS ===
