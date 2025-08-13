@@ -168,3 +168,10 @@ client.on(Events.ClientReady, () => {
 });
 
 client.login(process.env.BOT_TOKEN);
+import express from 'express';
+
+const app = express();
+app.get('/', (req, res) => res.send('Bot is running.'));
+app.listen(process.env.PORT || 3000);
+  }
+});
