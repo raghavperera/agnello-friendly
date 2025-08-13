@@ -160,4 +160,15 @@ client.on(Events.MessageDelete, msg => {
 
 // ---- VC Idle ----
 client.on(Events.ClientReady, () => {
-  console.log(`Logged in as
+  console.log(`Logged in as ${client.user.tag}`);
+  const vc = client.channels.cache.get('1357085245983162708');
+  if (vc && vc.isVoiceBased()) vc.join?.().catch(() => {});
+  client.channels.cache.get(logChannelId)?.send('Bot ready and in VC idle.');
+});
+
+// ---- Express server ----
+const app = express();
+app.get('/', (req,res)=>res.send('Bot is running.'));
+app.listen(process.env.PORT || 3000);
+
+client.login(process.env.BOT_TOKEN);
