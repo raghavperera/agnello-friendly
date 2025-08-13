@@ -1,153 +1,170 @@
-const Discord = require('discord.js');
-const client = new Discord.Client({ intents: ["GUILDS", "GUILD_MESSAGES", "GUILD_VOICE_STATES"] });
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  EmbedBuilder,
+  Events
+} from 'discord.js';
+import 'dotenv/config';
 
-// Set up the logging channel
-const logChannel = '1405241260624838686';
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
+});
 
-// Define the reaction role positions
+const logChannelId = '1405241260624838686';
+
+// Positions mapping
 const positions = {
-  '1': 'GK',
-  '2': 'CB',
-  '3': 'CB',
-  '4': 'CM',
-  '5': 'LW',
-  '6': 'RW',
-  '7': 'ST'
+  '1️⃣': 'GK',
+  '2️⃣': 'CB',
+  '3️⃣': 'CB',
+  '4️⃣': 'CM',
+  '5️⃣': 'LW',
+  '6️⃣': 'RW',
+  '7️⃣': 'ST'
 };
 
-// Command: /friendly
-client.on('interactionCreate', async (interaction) => {
+const badWords = ['fuck', 'bitch', 'nigger', 'dick', 'nigga', 'pussy'];
+
+// Slash command handling
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
   if (interaction.commandName === 'friendly') {
-    // Ping @everyone and send the message
-    await interaction.reply(':AGNELLO: Agnello FC friendly, react for your position :AGNELLO:');
-
-    // Create the reaction role message
-    const message = await interaction.channel.send('React with the number corresponding to your position:');
-
-    // Add the reactions
-    for (const [emoji, position] of Object.entries(positions)) {
-      await message.react(emoji);
+    // Restrict to specific channels
+    const allowedChannels = ['1361111188506935428', '1378795435589632010'];
+    if (!allowedChannels.includes(interaction.channelId)) {
+      return interaction.reply({ content: 'You can only host a friendly in the designated channels.', ephemeral: true });
     }
 
-    // Wait for reactions and assign roles
-    const filter = (reaction, user) => {
-      return Object.keys(positions).includes(reaction.emoji.name) && !user.bot;
-    };
+    // Restrict by role
+    const requiredRoleId = '1383970211933454378';
+    const member = interaction.member;
+    const hasRoleOrHigher = member.roles.cache.some(role => role.id === requiredRoleId || role.position >= interaction.guild.roles.cache.get(requiredRoleId).position);
+    if (!hasRoleOrHigher) {
+      return interaction.reply({ content: 'You do not have permission to host a friendly.', ephemeral: true });
+    }
 
-    const collector = message.createReactionCollector({ filter, time: 60000 });
+    await interaction.reply('@everyone :AGNELLO: Agnello FC friendly, react for your position :AGNELLO:');
 
-    collector.on('collect', async (reaction, user) => {
-      const position = positions[reaction.emoji.name];
-      const member = await interaction.guild.members.fetch(user.id);
-      await member.roles.add(reaction.emoji.name);
-      client.channels.cache.get(logChannel).send(`${user.username} has claimed the ${position} position.`);
-    });
+    const msg = await interaction.channel.send(`React with the number corresponding to your position:
+1️⃣ → GK  
+2️⃣ → CB  
+3️⃣ → CB2  
+4️⃣ → CM  
+5️⃣ → LW  
+6️⃣ → RW  
+7️⃣ → ST`);
 
-    collector.on('end', collected => {
-      if (collected.size === Object.keys(positions).length) {
-        message.channel.send('Looking for a Roblox RFL link...');
+    for (const emoji of Object.keys(positions)) {
+      await msg.react(emoji);
+    }
+
+    const claimed = {};
+    const filter = (reaction, user) => !user.bot && positions[reaction.emoji.name] && !Object.values(claimed).includes(user.id);
+    const collector = msg.createReactionCollector({ filter, time: 600000 }); // 10 minutes
+
+    collector.on('collect', (reaction, user) => {
+      if (!claimed[reaction.emoji.name]) {
+        claimed[reaction.emoji.name] = user.id;
+        msg.edit(`**Current lineup:**\n` + Object.entries(positions).map(([emoji, pos]) => `${emoji} → ${claimed[emoji] ? `<@${claimed[emoji]}> (${pos})` : pos}`).join('\n'));
+        client.channels.cache.get(logChannelId)?.send(`${user.tag} claimed ${positions[reaction.emoji.name]}`);
+      }
+
+      if (Object.keys(claimed).length === Object.keys(positions).length) {
+        collector.stop('filled');
       }
     });
-  }
-});
 
-// Command: /activity
-client.on('interactionCreate', async (interaction) => {
-  if (interaction.commandName === 'activity') {
-    // Send the activity check message
-    const message = await interaction.reply(':AGNELLO: @everyone, AGNELLO FC ACTIVITY CHECK, GOAL (5), REACT WITH A ✅');
-    await message.react('✅');
+    collector.on('end', (collected, reason) => {
+      if (reason === 'filled') {
+        interaction.channel.send('Looking for a Roblox RFL link...');
+        const linkFilter = m => m.content.includes('roblox.com') && !m.author.bot;
+        const linkCollector = interaction.channel.createMessageCollector({ filter: linkFilter, time: 900000 }); // 15 mins
 
-    // Wait for reactions and log the activity
-    const filter = (reaction, user) => {
-      return reaction.emoji.name === '✅' && !user.bot;
-    };
-
-    const collector = message.createReactionCollector({ filter, time: 60000 });
-
-    collector.on('collect', async (reaction, user) => {
-      const member = await interaction.guild.members.fetch(user.id);
-      client.channels.cache.get(logChannel).send(`${user.username} has responded to the activity check.`);
-    });
-
-    collector.on('end', collected => {
-      if (collected.size === 0) {
-        message.channel.send('No one responded to the activity check.');
-      }
-    });
-  }
-});
-
-// Command: /dmall
-client.on('interactionCreate', async (interaction) => {
-  if (interaction.commandName === 'dmall') {
-    // Check if the user is the server owner
-    if (interaction.user.id === interaction.guild.ownerId) {
-      // Prompt the user for a message
-      const filter = (m) => m.author.id === interaction.user.id;
-      const collector = interaction.channel.createMessageCollector({ filter, time: 60000, max: 1 });
-
-      collector.on('collect', async (message) => {
-        // DM the message to all users in the server
-        const members = await interaction.guild.members.fetch();
-        members.forEach(member => {
-          if (!member.user.bot) {
-            member.user.send(`${message.content}`);
-          }
+        linkCollector.on('collect', linkMsg => {
+          Object.values(claimed).forEach(userId => {
+            client.users.send(userId, `<@${userId}>, here is the friendly link: ${linkMsg.content}`);
+          });
+          linkCollector.stop();
         });
+      }
+    });
+  }
 
-        client.channels.cache.get(logChannel).send(`The server owner has sent a DM to all users.`);
-      });
+  if (interaction.commandName === 'activity') {
+    const goal = interaction.options.getInteger('goal') ?? 0;
+    const msg = await interaction.reply({ content: `:AGNELLO: @everyone, AGNELLO FC ACTIVITY CHECK, GOAL (${goal}), REACT WITH A ✅`, fetchReply: true });
+    await msg.react('✅');
 
-      collector.on('end', collected => {
-        if (collected.size === 0) {
-          interaction.reply('No message provided.');
-        }
-      });
-    } else {
-      interaction.reply('Only the server owner can use this command.');
+    const filter = (reaction, user) => reaction.emoji.name === '✅' && !user.bot;
+    const collector = msg.createReactionCollector({ filter, time: 86400000 }); // 1 day
+
+    collector.on('collect', user => {
+      client.channels.cache.get(logChannelId)?.send(`${user.tag} responded to activity check.`);
+    });
+  }
+
+  if (interaction.commandName === 'dmall') {
+    if (interaction.user.id !== interaction.guild.ownerId) {
+      return interaction.reply({ content: 'Only the server owner can use this command.', ephemeral: true });
     }
-  }
-});
+    await interaction.reply({ content: 'Please send the message you want to DM everyone.', ephemeral: true });
+    const filter = m => m.author.id === interaction.user.id;
+    const collector = interaction.channel.createMessageCollector({ filter, max: 1, time: 60000 });
 
-// Command: /announcement
-client.on('interactionCreate', async (interaction) => {
+    collector.on('collect', m => {
+      interaction.guild.members.fetch().then(members => {
+        members.forEach(member => {
+          if (!member.user.bot) member.send(m.content).catch(() => {});
+        });
+        client.channels.cache.get(logChannelId)?.send('Server owner sent a DM to all members.');
+      });
+    });
+  }
+
   if (interaction.commandName === 'announcement') {
-    // Send the announcement message
     await interaction.reply('There is a announcement in Agnello FC, please check it out. https://discord.com/channels/1357085245983162708/1361111742427697152');
-    client.channels.cache.get(logChannel).send(`An announcement has been made.`);
+    client.channels.cache.get(logChannelId)?.send('Announcement sent.');
   }
 });
 
-// Logging system
-client.on('messageDelete', async (message) => {
-  client.channels.cache.get(logChannel).send(`A message by ${message.author.username} has been deleted: ${message.content}`);
+// Deleted message logging
+client.on(Events.MessageDelete, message => {
+  if (!message.partial && message.author) {
+    client.channels.cache.get(logChannelId)?.send(`Message deleted by ${message.author.tag}: ${message.content}`);
+  }
 });
 
 // Bad word filter
-const badWords = ['fuck', 'bitch', 'nigger', 'dick', 'nigga', 'pussy'];
-
-client.on('messageCreate', async (message) => {
+client.on(Events.MessageCreate, message => {
   if (message.author.bot) return;
-
-  // Check for bad words
-  for (const word of badWords) {
-    if (message.content.toLowerCase().includes(word.toLowerCase()) || message.content.replace(/\s/g, '').toLowerCase().includes(word.toLowerCase())) {
-      await message.delete();
-      await message.channel.send(`You can't say that word, ${message.author}!`);
-      client.channels.cache.get(logChannel).send(`${message.author.username} tried to say a bad word: ${message.content}`);
+  const cleaned = message.content.toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (const bad of badWords) {
+    if (cleaned.includes(bad)) {
+      message.delete().catch(() => {});
+      message.channel.send(`You can't say that word, ${message.author}!`);
+      client.channels.cache.get(logChannelId)?.send(`${message.author.tag} tried to say a bad word: ${message.content}`);
       return;
     }
   }
 });
 
-// Join and idle in voice channel
-client.on('ready', () => {
-  const voiceChannel = client.channels.cache.get('1357085245983162708');
-  if (voiceChannel && voiceChannel.type === 'GUILD_VOICE') {
-    voiceChannel.join();
-    client.channels.cache.get(logChannel).send('Bot has joined the voice channel, now idling.');
+// Join VC and idle
+client.on(Events.ClientReady, () => {
+  console.log(`Logged in as ${client.user.tag}`);
+  const vc = client.channels.cache.get('1357085245983162708');
+  if (vc && vc.isVoiceBased()) {
+    vc.join?.().catch(() => {}); // For older voice lib compatibility
+    client.channels.cache.get(logChannelId)?.send('Bot joined VC to idle.');
   }
 });
 
-client.login('BOT_TOKEN');
+client.login(process.env.BOT_TOKEN);
