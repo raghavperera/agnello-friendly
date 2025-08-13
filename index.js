@@ -6,6 +6,8 @@ import {
   Events
 } from 'discord.js';
 import 'dotenv/config';
+import express from 'express';
+import { joinVoiceChannel } from '@discordjs/voice';
 
 const client = new Client({
   intents: [
@@ -20,7 +22,7 @@ const client = new Client({
 
 const logChannelId = '1405241260624838686';
 
-// Positions mapping
+// Position mapping for /friendly
 const positions = {
   '1️⃣': 'GK',
   '2️⃣': 'CB',
@@ -31,25 +33,39 @@ const positions = {
   '7️⃣': 'ST'
 };
 
+// Bad words filter
 const badWords = ['fuck', 'bitch', 'nigger', 'dick', 'nigga', 'pussy'];
 
-// Slash command handling
+/**
+ * Slash command handling
+ */
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
+  // ============================
+  // FRIENDLY
+  // ============================
   if (interaction.commandName === 'friendly') {
-    // Restrict to specific channels
     const allowedChannels = ['1361111188506935428', '1378795435589632010'];
     if (!allowedChannels.includes(interaction.channelId)) {
-      return interaction.reply({ content: 'You can only host a friendly in the designated channels.', ephemeral: true });
+      return interaction.reply({
+        content: 'You can only host a friendly in the designated channels.',
+        ephemeral: true
+      });
     }
 
-    // Restrict by role
     const requiredRoleId = '1383970211933454378';
     const member = interaction.member;
-    const hasRoleOrHigher = member.roles.cache.some(role => role.id === requiredRoleId || role.position >= interaction.guild.roles.cache.get(requiredRoleId).position);
+    const requiredRole = interaction.guild.roles.cache.get(requiredRoleId);
+    const hasRoleOrHigher = member.roles.cache.some(
+      role => role.id === requiredRoleId || role.position >= requiredRole.position
+    );
+
     if (!hasRoleOrHigher) {
-      return interaction.reply({ content: 'You do not have permission to host a friendly.', ephemeral: true });
+      return interaction.reply({
+        content: 'You do not have permission to host a friendly.',
+        ephemeral: true
+      });
     }
 
     await interaction.reply('@everyone :AGNELLO: Agnello FC friendly, react for your position :AGNELLO:');
@@ -68,13 +84,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     const claimed = {};
-    const filter = (reaction, user) => !user.bot && positions[reaction.emoji.name] && !Object.values(claimed).includes(user.id);
-    const collector = msg.createReactionCollector({ filter, time: 600000 }); // 10 minutes
+    const filter = (reaction, user) =>
+      !user.bot &&
+      positions[reaction.emoji.name] &&
+      !Object.values(claimed).includes(user.id);
+
+    const collector = msg.createReactionCollector({ filter, time: 600000 });
 
     collector.on('collect', (reaction, user) => {
       if (!claimed[reaction.emoji.name]) {
         claimed[reaction.emoji.name] = user.id;
-        msg.edit(`**Current lineup:**\n` + Object.entries(positions).map(([emoji, pos]) => `${emoji} → ${claimed[emoji] ? `<@${claimed[emoji]}> (${pos})` : pos}`).join('\n'));
+        msg.edit(
+          `**Current lineup:**\n` +
+            Object.entries(positions)
+              .map(([emoji, pos]) => `${emoji} → ${claimed[emoji] ? `<@${claimed[emoji]}> (${pos})` : pos}`)
+              .join('\n')
+        );
         client.channels.cache.get(logChannelId)?.send(`${user.tag} claimed ${positions[reaction.emoji.name]}`);
       }
 
@@ -87,7 +112,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (reason === 'filled') {
         interaction.channel.send('Looking for a Roblox RFL link...');
         const linkFilter = m => m.content.includes('roblox.com') && !m.author.bot;
-        const linkCollector = interaction.channel.createMessageCollector({ filter: linkFilter, time: 900000 }); // 15 mins
+        const linkCollector = interaction.channel.createMessageCollector({ filter: linkFilter, time: 900000 });
 
         linkCollector.on('collect', linkMsg => {
           Object.values(claimed).forEach(userId => {
@@ -99,24 +124,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
     });
   }
 
+  // ============================
+  // ACTIVITY
+  // ============================
   if (interaction.commandName === 'activity') {
     const goal = interaction.options.getInteger('goal') ?? 0;
-    const msg = await interaction.reply({ content: `:AGNELLO: @everyone, AGNELLO FC ACTIVITY CHECK, GOAL (${goal}), REACT WITH A ✅`, fetchReply: true });
+    const msg = await interaction.reply({
+      content: `:AGNELLO: @everyone, AGNELLO FC ACTIVITY CHECK, GOAL (${goal}), REACT WITH A ✅`,
+      fetchReply: true
+    });
+
     await msg.react('✅');
 
     const filter = (reaction, user) => reaction.emoji.name === '✅' && !user.bot;
-    const collector = msg.createReactionCollector({ filter, time: 86400000 }); // 1 day
+    const collector = msg.createReactionCollector({ filter, time: 86400000 });
 
-    collector.on('collect', user => {
+    collector.on('collect', (reaction, user) => {
       client.channels.cache.get(logChannelId)?.send(`${user.tag} responded to activity check.`);
     });
   }
 
+  // ============================
+  // DM ALL
+  // ============================
   if (interaction.commandName === 'dmall') {
     if (interaction.user.id !== interaction.guild.ownerId) {
-      return interaction.reply({ content: 'Only the server owner can use this command.', ephemeral: true });
+      return interaction.reply({
+        content: 'Only the server owner can use this command.',
+        ephemeral: true
+      });
     }
+
     await interaction.reply({ content: 'Please send the message you want to DM everyone.', ephemeral: true });
+
     const filter = m => m.author.id === interaction.user.id;
     const collector = interaction.channel.createMessageCollector({ filter, max: 1, time: 60000 });
 
@@ -130,20 +170,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
     });
   }
 
+  // ============================
+  // ANNOUNCEMENT
+  // ============================
   if (interaction.commandName === 'announcement') {
-    await interaction.reply('There is a announcement in Agnello FC, please check it out. https://discord.com/channels/1357085245983162708/1361111742427697152');
+    await interaction.reply(
+      'There is an announcement in Agnello FC, please check it out: https://discord.com/channels/1357085245983162708/1361111742427697152'
+    );
     client.channels.cache.get(logChannelId)?.send('Announcement sent.');
   }
 });
 
-// Deleted message logging
+/**
+ * Deleted message logging
+ */
 client.on(Events.MessageDelete, message => {
   if (!message.partial && message.author) {
     client.channels.cache.get(logChannelId)?.send(`Message deleted by ${message.author.tag}: ${message.content}`);
   }
 });
 
-// Bad word filter
+/**
+ * Bad word filter
+ */
 client.on(Events.MessageCreate, message => {
   if (message.author.bot) return;
   const cleaned = message.content.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -157,21 +206,31 @@ client.on(Events.MessageCreate, message => {
   }
 });
 
-// Join VC and idle
+/**
+ * Ready event
+ */
 client.on(Events.ClientReady, () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Join VC
   const vc = client.channels.cache.get('1357085245983162708');
   if (vc && vc.isVoiceBased()) {
-    vc.join?.().catch(() => {}); // For older voice lib compatibility
+    joinVoiceChannel({
+      channelId: vc.id,
+      guildId: vc.guild.id,
+      adapterCreator: vc.guild.voiceAdapterCreator
+    });
     client.channels.cache.get(logChannelId)?.send('Bot joined VC to idle.');
   }
 });
 
-client.login(process.env.BOT_TOKEN);
-import express from 'express';
-
+/**
+ * Express keep-alive for Render
+ */
 const app = express();
 app.get('/', (req, res) => res.send('Bot is running.'));
-app.listen(process.env.PORT || 3000);
-  }
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`🌐 Server listening on port ${process.env.PORT || 3000}`);
 });
+
+client.login(process.env.BOT_TOKEN);
