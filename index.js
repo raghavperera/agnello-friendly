@@ -3,7 +3,7 @@ import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerSt
 import express from 'express';
 import 'dotenv/config';
 import ytdl from 'ytdl-core';
-import play from 'play-dl';
+import play from '@iamtraction/play-dl';
 import { OpenAI } from 'openai';
 
 const client = new Client({
