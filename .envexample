@@ -2,4 +2,5 @@ DISCORD_TOKEN=your_discord_token
 GUILD_ID=your_guild_id
 TOKEN=your_discord_token
 CLIENT_ID=your_client_id
+OPENAI_API_KEY=your_openaikey
 PORT=3000
