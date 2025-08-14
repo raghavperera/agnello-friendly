@@ -533,7 +533,8 @@ app.listen(process.env.PORT || 3000, () => console.log('HTTP server listening'))
 // login
 ////////////////////////////////////////////////////////////////////////////////
 
-client.login(process.env.BOT_TOKEN).catch(err => {
-  console.error('Failed to login:', err);
-  process.exit(1);
+client.login(process.env.BOT_TOKEN)
+  .then(() => console.log("Bot logged in!"))
+  .catch(err => console.error("Failed to login:", err));
+
 });
