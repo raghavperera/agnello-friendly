@@ -1,25 +1,14 @@
 /**
- * index.js - Agnello FC all-in-one bot
+ * index.js - Agnello FC all-in-one bot (single-file)
  *
- * Features:
- * - Prefix commands (!hostfriendly, !activity, !dmrole, !joinvc, !play, !skip, !stop, !queue, !kick, !ban, !ticket, !serverstats)
- * - Friendly reaction-role hoster (1-7 positions), role-restricted
- * - Activity check with ✅ reactions
- * - DM role command
- * - Music playback via @iamtraction/play-dl and @discordjs/voice
- * - Welcome & goodbye messages + DMs
- * - Ticket system (creates private channels)
- * - Basic invite tracking placeholders
- * - Bad-word detection in text and (via OpenAI transcription) in VC; auto-mute on detection
- * - Express keep-alive for Render
+ * - Uses @iamtraction/play-dl@^1.9.8 (verified)
+ * - Uses OpenAI audio transcriptions endpoint for VC -> text
+ * - Auto-mutes members in VC when profanity is transcribed
  *
- * Requirements:
- * - Environment variables: BOT_TOKEN, OPENAI_API_KEY (for transcription)
- * - Privileged intents enabled (Message Content, Guild Members)
- * - Bot invited with necessary permissions (Mute Members, Connect, Speak, Manage Channels, Send Messages, etc.)
- * - package.json includes required deps (@iamtraction/play-dl, @discordjs/voice, prism-media, @ffmpeg-installer/ffmpeg, openai/node fetch/form-data)
- *
- * Deploy notes: push this + package.json to GitHub, set env vars in Render, deploy.
+ * Before deploying:
+ * - Set BOT_TOKEN and OPENAI_API_KEY in Render environment
+ * - Enable Message Content Intent and Guild Members Intent in Discord Dev Portal
+ * - Invite bot with Mute Members, Connect, Speak, Manage Channels, Send Messages, etc.
  */
 
 import fs from 'fs';
@@ -39,7 +28,6 @@ import {
 
 import {
   joinVoiceChannel,
-  getVoiceConnection,
   createAudioPlayer,
   createAudioResource,
   AudioPlayerStatus,
@@ -55,33 +43,43 @@ import express from 'express';
 import 'dotenv/config';
 import play from '@iamtraction/play-dl';
 
-//
-// CONFIG - change IDs if needed
-//
+////////////////////////////////////////////////////////////////////////////////
+// CONFIG - update these IDs if needed
+////////////////////////////////////////////////////////////////////////////////
+
 const LOG_CHANNEL_ID = '1362214241091981452';
 const FRIENDLY_ROLE_ID = '1383970211933454378';
-const WELCOME_CHANNEL_ID = '1361113546829729914'; // channel to announce welcome/goodbye (optional)
+const WELCOME_CHANNEL_ID = '1361113546829729914';
 const PREFIX = '!';
-const POSITIONS = { '1️⃣': 'GK', '2️⃣': 'CB', '3️⃣': 'CB2', '4️⃣': 'CM', '5️⃣': 'LW', '6️⃣': 'RW', '7️⃣': 'ST' };
+const POSITIONS = {
+  '1️⃣': 'GK',
+  '2️⃣': 'CB',
+  '3️⃣': 'CB2',
+  '4️⃣': 'CM',
+  '5️⃣': 'LW',
+  '6️⃣': 'RW',
+  '7️⃣': 'ST'
+};
 const BAD_WORDS = ['fuck', 'bitch', 'nigger', 'dick', 'nigga', 'pussy'];
 const TRANSCRIPTS_DIR = './transcripts_tmp';
 if (!fs.existsSync(TRANSCRIPTS_DIR)) fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
 
-//
+////////////////////////////////////////////////////////////////////////////////
 // ENV checks
-//
+////////////////////////////////////////////////////////////////////////////////
+
 if (!process.env.BOT_TOKEN) {
-  console.error('Missing BOT_TOKEN env var. Set BOT_TOKEN in Render or .env.');
+  console.error('Missing BOT_TOKEN in environment. Set BOT_TOKEN before starting.');
   process.exit(1);
 }
-// OPENAI_API_KEY optional for text-only features; needed for VC transcription
 if (!process.env.OPENAI_API_KEY) {
   console.warn('OPENAI_API_KEY not set — VC transcription will be disabled until you set it.');
 }
 
-//
-// Create client
-//
+////////////////////////////////////////////////////////////////////////////////
+// CLIENT
+////////////////////////////////////////////////////////////////////////////////
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -94,10 +92,12 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-// Music queues per guild
-const queues = new Map(); // guildId -> { connection, player, songs: [{resource, title, url}], textChannelId, voiceChannelId }
+const queues = new Map(); // guildId -> { connection, player, songs, textChannelId, voiceChannelId }
 
-// Simple logging helper
+////////////////////////////////////////////////////////////////////////////////
+// UTIL: logging to the configured log channel
+////////////////////////////////////////////////////////////////////////////////
+
 async function logToChannel(text) {
   try {
     const ch = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
@@ -107,14 +107,15 @@ async function logToChannel(text) {
   }
 }
 
-//
-// FRIENDLY - reaction role friendly hoster
-//
+////////////////////////////////////////////////////////////////////////////////
+// FRIENDLY: reaction-role style friendly hoster
+////////////////////////////////////////////////////////////////////////////////
+
 async function handleFriendly(channel, member) {
   try {
-    const requiredRole = channel.guild.roles.cache.get(FRIENDLY_ROLE_ID);
-    if (!requiredRole) return channel.send('Configuration error: required role missing on server.');
-    const has = member.roles.cache.some(r => r.id === FRIENDLY_ROLE_ID || r.position >= requiredRole.position);
+    const reqRole = channel.guild.roles.cache.get(FRIENDLY_ROLE_ID);
+    if (!reqRole) return channel.send('Configuration error: required role missing.');
+    const has = member.roles.cache.some(r => r.id === FRIENDLY_ROLE_ID || r.position >= reqRole.position);
     if (!has) return channel.send('You do not have permission to host a friendly.');
 
     await channel.send('@everyone :AGNELLO: Agnello Friendly, react to position :AGNELLO:');
@@ -128,7 +129,7 @@ async function handleFriendly(channel, member) {
 7️⃣ → ST`);
 
     for (const emoji of Object.keys(POSITIONS)) {
-      try { await msg.react(emoji); } catch {}
+      try { await msg.react(emoji); } catch (e) { /* ignore */ }
     }
 
     const claimed = {};
@@ -138,10 +139,7 @@ async function handleFriendly(channel, member) {
     collector.on('collect', (reaction, user) => {
       if (!claimed[reaction.emoji.name]) {
         claimed[reaction.emoji.name] = user.id;
-        msg.edit(
-          '**Current lineup:**\n' +
-          Object.entries(POSITIONS).map(([emoji, pos]) => `${emoji} → ${claimed[emoji] ? `<@${claimed[emoji]}> (${pos})` : pos}`).join('\n')
-        ).catch(()=>{});
+        msg.edit('**Current lineup:**\n' + Object.entries(POSITIONS).map(([emoji, pos]) => `${emoji} → ${claimed[emoji] ? `<@${claimed[emoji]}> (${pos})` : pos}`).join('\n')).catch(()=>{});
         logToChannel(`${user.tag} claimed ${POSITIONS[reaction.emoji.name]}`);
       }
       if (Object.keys(claimed).length === Object.keys(POSITIONS).length) collector.stop('filled');
@@ -159,15 +157,16 @@ async function handleFriendly(channel, member) {
         });
       }
     });
-  } catch (err) {
-    console.error('handleFriendly error', err);
+  } catch (e) {
+    console.error('handleFriendly error', e);
     channel.send('An error occurred while creating the friendly.');
   }
 }
 
-//
-// MUSIC helpers
-//
+////////////////////////////////////////////////////////////////////////////////
+// MUSIC: helpers (ensureQueue, makeTrack)
+////////////////////////////////////////////////////////////////////////////////
+
 async function ensureQueue(guild, textChannel, voiceChannel) {
   let q = queues.get(guild.id);
   if (!q) {
@@ -186,7 +185,7 @@ async function ensureQueue(guild, textChannel, voiceChannel) {
       guildId: guild.id,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator
     });
-    try { q.connection.subscribe(q.player); } catch (e) { console.warn('subscribe error', e); }
+    try { q.connection.subscribe(q.player); } catch (err) { console.warn('subscribe err', err); }
     q.player.on(AudioPlayerStatus.Idle, () => {
       if (q.songs.length > 0) {
         const next = q.songs.shift();
@@ -212,9 +211,10 @@ async function makeTrack(query) {
   return { resource, title, url };
 }
 
-//
-// TRANSCRIPTION + AUTO-MUTE (OpenAI Whisper via REST multipart)
-//
+////////////////////////////////////////////////////////////////////////////////
+// TRANSCRIPTION: helper functions to convert PCM->wav and call OpenAI
+////////////////////////////////////////////////////////////////////////////////
+
 async function transcribeWavFile(wavPath) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not set');
   const form = new FormData();
@@ -223,9 +223,7 @@ async function transcribeWavFile(wavPath) {
 
   const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-    },
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: form
   });
   if (!res.ok) {
@@ -239,31 +237,26 @@ async function transcribeWavFile(wavPath) {
 function pcmToWav(pcmPath, wavPath) {
   return new Promise((resolve, reject) => {
     const args = [
-      // input settings: signed 16-bit little endian, 48k stereo
       '-f','s16le','-ar','48000','-ac','2','-i',pcmPath,
-      // output settings: 16k mono wav (OpenAI accepts many formats; 16k mono is safe)
       '-ar','16000','-ac','1',wavPath
     ];
-    const proc = spawn(ffmpegPath.path, args);
-    proc.on('error', reject);
-    proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg exit code ${code}`)));
+    const ff = spawn(ffmpegPath.path, args);
+    ff.on('error', reject);
+    ff.on('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg exit code ${code}`)));
   });
 }
 
-// Start a transcription listener for a member's opus stream
 async function createTranscriptionListener(connection, guild, member) {
   try {
     const receiver = connection.receiver;
     if (!receiver) return;
 
-    // Subscribe to opus for this user; end after 1.5s silence
     const opusStream = receiver.subscribe(member.id, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: 1500 }
     });
 
     const pcmFile = path.join(TRANSCRIPTS_DIR, `${member.id}-${Date.now()}.pcm`);
     const wavFile = pcmFile + '.wav';
-
     const decoder = new prism.opus.Decoder({ frameSize: 960, channels: 2, rate: 48000 });
     const outStream = fs.createWriteStream(pcmFile);
     opusStream.pipe(decoder).pipe(outStream);
@@ -272,11 +265,7 @@ async function createTranscriptionListener(connection, guild, member) {
       try {
         outStream.end();
         await pcmToWav(pcmFile, wavFile);
-        const text = await transcribeWavFile(wavFile).catch(e => {
-          console.error('transcribeWavFile error', e);
-          return '';
-        });
-        // cleanup
+        const text = await transcribeWavFile(wavFile).catch(e => { console.error('transcribe err', e); return ''; });
         try { fs.unlinkSync(pcmFile); } catch {}
         try { fs.unlinkSync(wavFile); } catch {}
 
@@ -284,24 +273,22 @@ async function createTranscriptionListener(connection, guild, member) {
         const normalized = text.toLowerCase();
         for (const bad of BAD_WORDS) {
           if (normalized.includes(bad)) {
-            // mute member in VC
             try {
-              const fetchedMember = await guild.members.fetch(member.id).catch(()=>null);
-              if (fetchedMember && fetchedMember.voice.channelId) {
-                await fetchedMember.voice.setMute(true, 'Auto-moderation: profanity detected via transcription');
-                logToChannel(`Auto-muted ${fetchedMember.user.tag} for profanity detected in VC: "${bad}" (transcript: ${text.slice(0,200)})`);
-                // optional DM
-                fetchedMember.send('You were automatically muted in voice for using profanity. Please follow the server rules.').catch(()=>{});
+              const fetched = await guild.members.fetch(member.id).catch(()=>null);
+              if (fetched && fetched.voice.channelId) {
+                await fetched.voice.setMute(true, 'Auto-mod: profanity detected');
+                logToChannel(`Auto-muted ${fetched.user.tag} in VC for profanity (${bad}). Transcript: ${text.slice(0,200)}`);
+                fetched.send('You were auto-muted in voice for using profanity.').catch(()=>{});
               }
-            } catch (e) {
-              console.error('Failed to mute member', e);
-              logToChannel(`Failed to auto-mute user ${member.id}: ${String(e).slice(0,200)}`);
+            } catch (muteErr) {
+              console.error('mute error', muteErr);
+              logToChannel(`Failed to mute ${member.id}: ${String(muteErr).slice(0,200)}`);
             }
             break;
           }
         }
       } catch (err) {
-        console.error('opusStream end processing error', err);
+        console.error('opusStream end proc error', err);
       }
     });
 
@@ -313,14 +300,15 @@ async function createTranscriptionListener(connection, guild, member) {
   }
 }
 
-//
-// SINGLE MESSAGE LISTENER: commands + moderation
-//
+////////////////////////////////////////////////////////////////////////////////
+// SINGLE unified message handler: commands + text moderation
+////////////////////////////////////////////////////////////////////////////////
+
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild) return;
 
   // Quick text profanity filter
-  const compact = message.content.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const compact = message.content.toLowerCase().replace(/[^a-z0-9]/g,'');
   for (const bad of BAD_WORDS) {
     if (compact.includes(bad)) {
       try { await message.delete(); } catch {}
@@ -330,7 +318,7 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
-  // Commands
+  // commands: prefix-based
   if (!message.content.startsWith(PREFIX)) return;
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = (args.shift() || '').toLowerCase();
@@ -355,24 +343,23 @@ client.on(Events.MessageCreate, async (message) => {
     const msgText = args.slice(1).join(' ');
     const role = message.guild.roles.cache.get(roleId);
     if (!role) return message.reply('Role not found.');
-    let sent=0, failed=0;
+    let s=0, f=0;
     await Promise.all([...role.members.values()].map(async (m) => {
       if (m.user.bot) return;
-      try { await m.send(msgText); sent++; } catch { failed++; }
+      try { await m.send(msgText); s++; } catch { f++; }
     }));
-    message.channel.send(`DMs sent: ${sent}. Failed: ${failed}`);
+    message.channel.send(`DMs sent: ${s}. Failed: ${f}`);
     logToChannel(`${message.author.tag} used !dmrole on ${role.name}`);
     return;
   }
 
-  // kick/ban (admin only)
+  // kick/ban (admin)
   if (cmd === 'kick' || cmd === 'ban') {
     if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return message.reply('You do not have permission.');
     const target = message.mentions.members.first();
     if (!target) return message.reply('Mention a user.');
     try {
-      if (cmd === 'kick') await target.kick();
-      else await target.ban();
+      if (cmd === 'kick') await target.kick(); else await target.ban();
       message.channel.send(`${cmd === 'kick' ? 'Kicked' : 'Banned'} ${target.user.tag}.`);
       logToChannel(`${message.author.tag} ${cmd}ed ${target.user.tag}`);
     } catch (e) {
@@ -382,7 +369,7 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // joinvc - bot joins and begins short transcription listeners for active speakers
+  // joinvc -> join and start short transcription listeners
   if (cmd === 'joinvc') {
     const vc = message.member.voice.channel;
     if (!vc) return message.reply('Join a voice channel first.');
@@ -392,14 +379,11 @@ client.on(Events.MessageCreate, async (message) => {
         guildId: vc.guild.id,
         adapterCreator: vc.guild.voiceAdapterCreator
       });
-      // wait until ready
       await entersState(connection, VoiceConnectionStatus.Ready, 30_000).catch(()=>{});
       message.channel.send(`Joined ${vc.name}`);
       logToChannel(`${message.author.tag} used !joinvc to join ${vc.name}`);
-      // start listeners for each non-bot member currently in channel
-      for (const [memberId, member] of vc.members) {
+      for (const [id, member] of vc.members) {
         if (member.user.bot) continue;
-        // start transcription listener for member
         createTranscriptionListener(connection, message.guild, member).catch(console.error);
       }
     } catch (e) {
@@ -409,7 +393,7 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // play
+  // play/skip/stop/queue
   if (cmd === 'play') {
     const vc = message.member.voice.channel;
     if (!vc) return message.reply('Join a voice channel first.');
@@ -463,7 +447,7 @@ client.on(Events.MessageCreate, async (message) => {
         parent: category.id,
         permissionOverwrites: [
           { id: message.guild.roles.everyone.id, deny: ['ViewChannel'] },
-          { id: message.author.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] }
+          { id: message.author.id, allow: ['ViewChannel','SendMessages','ReadMessageHistory'] }
         ]
       });
       const staffRole = message.guild.roles.cache.get(FRIENDLY_ROLE_ID);
@@ -472,13 +456,13 @@ client.on(Events.MessageCreate, async (message) => {
       message.reply(`Ticket created: <#${channel.id}>`);
       logToChannel(`${message.author.tag} created ticket ${channel.id}`);
     } catch (e) {
-      console.error('ticket creation error', e);
+      console.error('ticket error', e);
       message.reply('Failed to create ticket.');
     }
     return;
   }
 
-  // serverstats simple setup/remove
+  // serverstats setup/remove
   if (cmd === 'serverstats') {
     if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) return message.reply('You do not have permission.');
     const sub = args[0] ? args[0].toLowerCase() : '';
@@ -500,12 +484,13 @@ client.on(Events.MessageCreate, async (message) => {
     } else return message.reply('Usage: !serverstats setup|remove');
   }
 
-  // unknown command: ignore
+  // end commands
 });
 
-//
-// Welcome / Goodbye
-//
+////////////////////////////////////////////////////////////////////////////////
+// member join/leave (welcome/goodbye)
+////////////////////////////////////////////////////////////////////////////////
+
 client.on(Events.GuildMemberAdd, async (member) => {
   try { await member.send(`Welcome to ${member.guild.name}, ${member.user.username}!`); } catch {}
   try {
@@ -522,32 +507,32 @@ client.on(Events.GuildMemberRemove, async (member) => {
   } catch {}
 });
 
-//
-// Deleted message logging
-//
+////////////////////////////////////////////////////////////////////////////////
+// message delete logging
+////////////////////////////////////////////////////////////////////////////////
+
 client.on(Events.MessageDelete, (msg) => {
   if (!msg || !msg.author) return;
   logToChannel(`Message deleted by ${msg.author.tag}: ${msg.content}`);
 });
 
-//
-// Ready
-//
+////////////////////////////////////////////////////////////////////////////////
+// ready + express keepalive
+////////////////////////////////////////////////////////////////////////////////
+
 client.on(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
   logToChannel('Bot online.');
 });
 
-//
-// Express keep-alive
-//
 const app = express();
 app.get('/', (_req, res) => res.send('Bot is running.'));
 app.listen(process.env.PORT || 3000, () => console.log('HTTP server listening'));
 
-//
-// Login
-//
+////////////////////////////////////////////////////////////////////////////////
+// login
+////////////////////////////////////////////////////////////////////////////////
+
 client.login(process.env.BOT_TOKEN).catch(err => {
   console.error('Failed to login:', err);
   process.exit(1);
