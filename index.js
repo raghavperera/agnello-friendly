@@ -1,9 +1,10 @@
 import { Client, GatewayIntentBits, Partials, Events, PermissionsBitField } from 'discord.js';
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } from '@discordjs/voice';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior, getVoiceConnection } from '@discordjs/voice';
 import express from 'express';
 import 'dotenv/config';
 import ytdl from 'ytdl-core';
 import play from 'play-dl';
+import { OpenAI } from 'openai';
 
 const client = new Client({
   intents: [
@@ -17,20 +18,25 @@ const client = new Client({
 });
 
 const logChannelId = '1362214241091981452';
-const positions = { '1️⃣': 'GK', '2️⃣': 'CB', '3️⃣': 'CB2', '4️⃣': 'CM', '5️⃣': 'LW', '6️⃣': 'RW', '7️⃣': 'ST' };
+const friendlyRoleId = '1383970211933454378';
+const adminPerms = [PermissionsBitField.Flags.Administrator];
 const badWords = ['fuck', 'bitch', 'nigger', 'dick', 'nigga', 'pussy'];
+const positions = { '1️⃣': 'GK', '2️⃣': 'CB', '3️⃣': 'CB2', '4️⃣': 'CM', '5️⃣': 'LW', '6️⃣': 'RW', '7️⃣': 'ST' };
 const queues = new Map();
 
-// ------------------ Friendly ------------------ //
+// OpenAI
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ------------------ Helper Functions ------------------ //
+async function log(msg) {
+  const channel = client.channels.cache.get(logChannelId);
+  if (channel) channel.send(msg).catch(() => {});
+}
+
 async function handleFriendly(channel, author, member) {
-  const requiredRoleId = '1383970211933454378';
-  const hasRoleOrHigher = member.roles.cache.some(
-    role => role.id === requiredRoleId || role.position >= member.guild.roles.cache.get(requiredRoleId).position
-  );
-  if (!hasRoleOrHigher) return channel.send('You do not have permission to host a friendly.');
+  if (!member.roles.cache.has(friendlyRoleId)) return channel.send('You do not have permission to host a friendly.');
 
   await channel.send('@everyone :AGNELLO: Agnello Friendly, react to position');
-
   const msg = await channel.send(`React with the number corresponding to your position:
 1️⃣ → GK  
 2️⃣ → CB  
@@ -55,7 +61,7 @@ async function handleFriendly(channel, author, member) {
             .map(([emoji, pos]) => `${emoji} → ${claimed[emoji] ? `<@${claimed[emoji]}> (${pos})` : pos}`)
             .join('\n')
       );
-      client.channels.cache.get(logChannelId)?.send(`${user.tag} claimed ${positions[reaction.emoji.name]}`);
+      log(`${user.tag} claimed ${positions[reaction.emoji.name]}`);
     }
     if (Object.keys(claimed).length === Object.keys(positions).length) collector.stop('filled');
   });
@@ -80,7 +86,6 @@ async function handleFriendly(channel, author, member) {
 // ------------------ Prefix Commands ------------------ //
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot) return;
-
   const args = message.content.trim().split(/ +/);
   const cmd = args.shift().toLowerCase();
 
@@ -93,7 +98,7 @@ client.on(Events.MessageCreate, async message => {
     const msg = await message.channel.send(`:AGNELLO: @everyone, AGNELLO FC ACTIVITY CHECK, GOAL (${goal}), REACT WITH A ✅`);
     await msg.react('✅');
     const collector = msg.createReactionCollector({ filter: (r, u) => r.emoji.name === '✅' && !u.bot, time: 86400000 });
-    collector.on('collect', user => client.channels.cache.get(logChannelId)?.send(`${user.tag} responded to activity check.`));
+    collector.on('collect', user => log(`${user.tag} responded to activity check.`));
   }
 
   // ---- DM Role ----
@@ -104,19 +109,17 @@ client.on(Events.MessageCreate, async message => {
     const role = message.guild.roles.cache.get(roleId);
     if (!role) return message.reply('Role not found.');
     const failed = [];
-    role.members.forEach(mem => { mem.send(dmMessage).catch(() => failed.push(mem.user.tag)); });
+    role.members.forEach(mem => mem.send(dmMessage).catch(() => failed.push(mem.user.tag)));
     message.channel.send(`DM sent to ${role.members.size - failed.length} members. Failed: ${failed.join(', ')}`);
   }
 
   // ---- Kick / Ban ----
-  if (cmd === '!kick' || cmd === '!ban') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers) && !message.member.permissions.has(PermissionsBitField.Flags.BanMembers))
-      return message.reply('You do not have permission.');
+  if ((cmd === '!kick' || cmd === '!ban') && message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
     const target = message.mentions.members.first();
     if (!target) return message.reply('Mention a user.');
     if (cmd === '!kick') target.kick().catch(() => message.reply('Failed to kick.'));
     if (cmd === '!ban') target.ban().catch(() => message.reply('Failed to ban.'));
-    client.channels.cache.get(logChannelId)?.send(`${message.author.tag} executed ${cmd} on ${target.user.tag}`);
+    log(`${message.author.tag} executed ${cmd} on ${target.user.tag}`);
   }
 
   // ---- Music ----
@@ -133,7 +136,7 @@ client.on(Events.MessageCreate, async message => {
     joinVoiceChannel({ channelId: vc.id, guildId: vc.guild.id, adapterCreator: vc.guild.voiceAdapterCreator });
     if (!queue.player.playing) {
       queue.player.play(queue.songs.shift().resource);
-      client.channels.cache.get(logChannelId)?.send(`Now playing: ${query}`);
+      log(`Now playing: ${query}`);
       queue.player.on(AudioPlayerStatus.Idle, () => { if (queue.songs.length > 0) queue.player.play(queue.songs.shift().resource); });
     }
   }
@@ -147,26 +150,37 @@ client.on(Events.MessageCreate, async message => {
     if (cleaned.includes(bad)) {
       message.delete().catch(() => {});
       message.channel.send(`You can't say that word, ${message.author}!`);
-      client.channels.cache.get(logChannelId)?.send(`${message.author.tag} tried to say a bad word: ${message.content}`);
+      log(`${message.author.tag} tried to say a bad word: ${message.content}`);
+      // TODO: Mute in VC if in VC and using bad word with Whisper transcription
       return;
     }
   }
 });
 
-// ---- Deleted messages ----
+// ------------------ Deleted messages ------------------ //
 client.on(Events.MessageDelete, msg => {
-  if (!msg.partial && msg.author) client.channels.cache.get(logChannelId)?.send(`Message deleted by ${msg.author.tag}: ${msg.content}`);
+  if (!msg.partial && msg.author) log(`Message deleted by ${msg.author.tag}: ${msg.content}`);
 });
 
-// ---- VC Idle ----
+// ------------------ Join VC command ------------------ //
+client.on(Events.MessageCreate, async message => {
+  if (message.author.bot) return;
+  if (message.content.toLowerCase() === '!joinvc') {
+    const vc = message.member.voice.channel;
+    if (!vc) return message.reply('Join a VC first.');
+    joinVoiceChannel({ channelId: vc.id, guildId: vc.guild.id, adapterCreator: vc.guild.voiceAdapterCreator });
+    message.channel.send('Joined your VC!');
+    log(`${message.author.tag} used !joinvc`);
+  }
+});
+
+// ------------------ Client Ready ------------------ //
 client.on(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
-  const vc = client.channels.cache.get('1357085245983162708');
-  if (vc && vc.isVoiceBased()) vc.join?.().catch(() => {});
-  client.channels.cache.get(logChannelId)?.send('Bot ready and in VC idle.');
+  log('Bot is online.');
 });
 
-// ---- Express server ----
+// ------------------ Express server ------------------ //
 const app = express();
 app.get('/', (req,res)=>res.send('Bot is running.'));
 app.listen(process.env.PORT || 3000);
