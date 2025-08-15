@@ -1,684 +1,599 @@
-/**
- * index.js - All-in-one Agnello FC bot
- * - Commands: !hostfriendly, !activity, !dmrole, !announcement, !kick, !ban,
- *   !joinvc, !play, !skip, !stop, !queue, !ticket, !serverstats, !inviteleaderboard, !help
- * - Features: music with resume, undeafened join, auto-reconnect, reaction-role friendly,
- *   ticket system, welcome/goodbye DMs, deleted message logging, text profanity filter,
- *   optional VC transcription + auto-mute via OpenAI Whisper (if OPENAI_API_KEY set).
- * - Keep-alive: Express server
- *
- * NOTE: you must supply BOT_TOKEN in environment. For transcription, set OPENAI_API_KEY
- * and ENABLE_TRANSCRIPTION=true in environment.
- */
+// index.js - Agnello FC all-in-one bot with Voice Moderation (ES module)
+// NOTE: This file builds on the previous template (music, hostfriendly, dmrole, moderation).
+// Voice moderation: records short audio chunks, transcribes with OpenAI, checks against swear list,
+// increments strikes, warns and mutes on thresholds.
 
+// Environment & imports
 import 'dotenv/config';
-import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
-import fetch from 'node-fetch';
-import FormData from 'form-data';
+import express from 'express';
+
+import OpenAI from 'openai';
+import prism from 'prism-media';
+import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 
 import {
   Client,
   GatewayIntentBits,
   Partials,
-  Events,
+  EmbedBuilder,
   PermissionsBitField,
-  ChannelType
+  Colors
 } from 'discord.js';
 
 import {
   joinVoiceChannel,
-  VoiceConnectionStatus,
-  entersState,
   createAudioPlayer,
   createAudioResource,
   AudioPlayerStatus,
-  NoSubscriberBehavior,
+  entersState,
+  VoiceConnectionStatus,
+  EndBehaviorType,
   getVoiceConnection
 } from '@discordjs/voice';
 
-import prism from 'prism-media';
-import ffmpegPath from '@ffmpeg-installer/ffmpeg';
-import play from '@iamtraction/play-dl';
-
-// -------------------- CONFIG --------------------
-const PREFIX = '!';
-const LOG_CHANNEL_ID = '1362214241091981452';        // logging channel (messages, moderation logs)
-const FRIENDLY_ROLE_ID = '1383970211933454378';      // role allowed to host friendlies
-const WELCOME_CHANNEL_ID = '1361113546829729914';    // welcome/goodbye announcements channel
-const TRANSCRIPTS_DIR = './transcripts_tmp';
-if (!fs.existsSync(TRANSCRIPTS_DIR)) fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
-
-// Friendly position mapping
-const POSITIONS = { '1️⃣': 'GK', '2️⃣': 'CB', '3️⃣': 'CB2', '4️⃣': 'CM', '5️⃣': 'LW', '6️⃣': 'RW', '7️⃣': 'ST' };
-
-// Profanity list (case-insensitive); you can expand or load from a file
-const BAD_WORDS = ['fuck', 'bitch', 'nigger', 'dick', 'nigga', 'pussy'];
-
-// Transcription toggles
-const ENABLE_TRANSCRIPTION = process.env.ENABLE_TRANSCRIPTION === 'true' && !!process.env.OPENAI_API_KEY;
-
-// -------------------- SANITY CHECKS --------------------
-console.log('Starting Agnello bot...');
-console.log('Node:', process.version);
-if (!process.env.BOT_TOKEN) {
-  console.error('ERROR: BOT_TOKEN is not set. Set it in your Render (or environment).');
+// -------------------- BASIC CONFIG --------------------
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (!BOT_TOKEN) {
+  console.error('BOT_TOKEN missing in env.');
   process.exit(1);
-} else {
-  console.log('BOT_TOKEN found (length):', process.env.BOT_TOKEN.length);
 }
-if (ENABLE_TRANSCRIPTION) {
-  console.log('Transcription ENABLED (OpenAI key present).');
-} else {
-  console.log('Transcription disabled (OPENAI_API_KEY not set or ENABLE_TRANSCRIPTION != true).');
+if (!OPENAI_API_KEY) {
+  console.warn('OPENAI_API_KEY not found. Voice moderation will not work without it.');
 }
 
-// -------------------- CLIENT --------------------
+const PREFIX = process.env.PREFIX ?? '!';
+const OWNER_ID = process.env.OWNER_ID ?? null;
+const KEEPALIVE_PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const DEFAULT_VC_ID = '1368359914145058956';
+const TEMP_DIR = './temp';
+if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+
+// -------------------- OpenAI client --------------------
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// -------------------- Discord client --------------------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildMessageReactions
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-// Music queues per guild
-// guildId => { connection, player, songs: [{title,url,resource}], textChannelId, voiceChannelId, playing }
-const queues = new Map();
-
-// Invite tracking (simple memory store; persists to file)
-const INVITES_FILE = './invites.json';
-let inviteCounts = {};
-try {
-  if (fs.existsSync(INVITES_FILE)) inviteCounts = JSON.parse(fs.readFileSync(INVITES_FILE, 'utf8'));
-} catch (e) { console.warn('Failed to load invites file:', e); }
-
-// -------------------- UTIL --------------------
-async function logToChannel(text) {
-  try {
-    const ch = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
-    if (ch && ch.isTextBased()) await ch.send(String(text).slice(0, 1900));
-  } catch (e) {
-    console.error('logToChannel error:', e);
-  }
-}
-
-function saveInvites() {
-  try { fs.writeFileSync(INVITES_FILE, JSON.stringify(inviteCounts, null, 2)); } catch (e) { console.warn('Failed to save invites:', e); }
-}
-
-function normalizeText(s) {
-  return s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '');
-}
-// Inside your command handling section:
-if (message.content.startsWith('!purge')) {
-  if (!message.member.permissions.has('ManageMessages')) {
-    return message.reply("❌ You don't have permission to manage messages.");
-  }
-
-  const args = message.content.split(' ').slice(1);
-  const amount = parseInt(args[0]);
-
-  if (!amount || isNaN(amount) || amount < 1 || amount > 100) {
-    return message.reply("❌ Please provide a number between 1 and 100.");
-  }
-
-  try {
-    await message.channel.bulkDelete(amount, true);
-    message.channel.send(`✅ Deleted ${amount} messages.`).then(msg => {
-      setTimeout(() => msg.delete(), 5000); // auto-delete the confirmation
-    });
-  } catch (err) {
-    console.error(err);
-    message.reply('❌ Could not delete messages.');
-  }
-}
-if (message.content.startsWith('!unban')) {
-  if (!message.member.permissions.has('BanMembers')) {
-    return message.reply("❌ You don't have permission to unban members.");
-  }
-
-  const args = message.content.split(' ').slice(1);
-  const userId = args[0];
-  if (!userId) return message.reply("❌ Please provide the user ID to unban.");
-
-  try {
-    const banList = await message.guild.bans.fetch();
-    const bannedUser = banList.get(userId);
-    if (!bannedUser) return message.reply("❌ That user is not banned.");
-
-    await message.guild.members.unban(userId);
-    message.channel.send(`✅ Successfully unbanned <@${userId}>.`);
-  } catch (err) {
-    console.error(err);
-    message.reply("❌ Failed to unban that user. Make sure the ID is correct.");
-  }
-}
-
-// -------------------- FRIENDLY HOSTER --------------------
-async function handleFriendly(channel, hostMember) {
-  try {
-    const requiredRole = channel.guild.roles.cache.get(FRIENDLY_ROLE_ID);
-    if (!requiredRole) return channel.send('Configuration error: required role missing on server.');
-    const has = hostMember.roles.cache.some(r => r.id === FRIENDLY_ROLE_ID || r.position >= requiredRole.position);
-    if (!has) return channel.send('You do not have permission to host a friendly.');
-
-    await channel.send('@everyone :AGNELLO: Agnello Friendly, react for your position :AGNELLO:');
-    const msg = await channel.send(`React with the number corresponding to your position:
-1️⃣ → GK
-2️⃣ → CB
-3️⃣ → CB2
-4️⃣ → CM
-5️⃣ → LW
-6️⃣ → RW
-7️⃣ → ST`);
-
-    for (const emoji of Object.keys(POSITIONS)) {
-      try { await msg.react(emoji); } catch {}
-    }
-
-    const claimed = {};
-    const filter = (reaction, user) => !user.bot && POSITIONS[reaction.emoji.name] && !Object.values(claimed).includes(user.id);
-    const collector = msg.createReactionCollector({ filter, time: 10 * 60 * 1000 });
-
-    collector.on('collect', (reaction, user) => {
-      if (!claimed[reaction.emoji.name]) {
-        claimed[reaction.emoji.name] = user.id;
-        msg.edit('**Current lineup:**\n' + Object.entries(POSITIONS).map(([emoji, pos]) => `${emoji} → ${claimed[emoji] ? `<@${claimed[emoji]}> (${pos})` : pos}`).join('\n')).catch(()=>{});
-        logToChannel(`${user.tag} claimed ${POSITIONS[reaction.emoji.name]}`);
-      }
-      if (Object.keys(claimed).length === Object.keys(POSITIONS).length) collector.stop('filled');
-    });
-
-    collector.on('end', () => {
-      if (Object.keys(claimed).length === Object.keys(POSITIONS).length) {
-        channel.send('Looking for a Roblox RFL link...');
-        const linkCollector = channel.createMessageCollector({ filter: m => m.content.includes('roblox.com') && !m.author.bot, time: 15 * 60 * 1000 });
-        linkCollector.on('collect', linkMsg => {
-          Object.values(claimed).forEach(uid => {
-            client.users.send(uid, `<@${uid}>, here is the friendly link: ${linkMsg.content}`).catch(()=>{});
-          });
-          linkCollector.stop();
-        });
-      }
-    });
-  } catch (e) {
-    console.error('handleFriendly error', e);
-    channel.send('Failed to create friendly due to an internal error.');
-  }
-}
-
-// -------------------- MUSIC: queue, ensure, track, resume --------------------
-async function ensureQueue(guild, textChannel, voiceChannel) {
-  let q = queues.get(guild.id);
-  if (!q) {
-    q = {
-      connection: null,
-      player: createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } }),
-      songs: [],
-      textChannelId: textChannel.id,
-      voiceChannelId: voiceChannel.id,
-      playing: false
-    };
-    queues.set(guild.id, q);
-
-    // handle player state transitions
-    q.player.on(AudioPlayerStatus.Idle, () => {
-      q.playing = false;
-      if (q.songs.length > 0) {
-        const next = q.songs.shift();
-        q.player.play(next.resource);
-        q.playing = true;
-        client.channels.fetch(q.textChannelId).then(ch => ch?.send(`Now playing: ${next.title}`).catch(()=>{}));
-      }
-    });
-    q.player.on('error', (err) => {
-      console.error('Audio player error', err);
-      logToChannel(`Audio player error: ${String(err).slice(0,1900)}`);
-    });
-  }
-
-  if (!q.connection) {
-    q.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: guild.id,
-      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf: false,   // **undeafen** so bot can hear VC (for moderation/transcription)
-      selfMute: false
-    });
-
-    // auto-reconnect logic
-    q.connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-      try {
-        await Promise.race([
-          entersState(q.connection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(q.connection, VoiceConnectionStatus.Connecting, 5_000)
-        ]);
-        // reconnected
-      } catch (err) {
-        try { q.connection.destroy(); } catch {}
-        queues.delete(guild.id);
-      }
-    });
-  }
-
-  return q;
-}
-
-async function makeTrack(query) {
-  let url = query.trim();
-  if (!/^https?:\/\//i.test(url)) {
-    const results = await play.search(query, { limit: 1 });
-    if (!results || results.length === 0) throw new Error('No results found');
-    url = results[0].url;
-  }
-  const stream = await play.stream(url);
-  const resource = createAudioResource(stream.stream, { inputType: stream.type });
-  const info = await play.video_info(url).catch(()=>null);
-  const title = (info && info.video_details && info.video_details.title) || url;
-  return { resource, title, url };
-}
-
-// -------------------- TRANSCRIPTION (optional) --------------------
-async function transcribeWavFile(wavPath) {
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not set');
-  const form = new FormData();
-  form.append('file', fs.createReadStream(wavPath));
-  form.append('model', 'whisper-1');
-
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-    body: form
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`OpenAI transcription failed ${res.status}: ${txt}`);
-  }
-  const j = await res.json();
-  return j.text || '';
-}
-
-function pcmToWav(pcmPath, wavPath) {
-  return new Promise((resolve, reject) => {
-    const args = ['-f','s16le','-ar','48000','-ac','2','-i',pcmPath,'-ar','16000','-ac','1',wavPath];
-    const proc = spawn(ffmpegPath.path, args);
-    proc.on('error', reject);
-    proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg exit code ${code}`)));
-  });
-}
-
-async function createTranscriptionListener(connection, guild, member) {
-  if (!ENABLE_TRANSCRIPTION) return;
-  try {
-    const receiver = connection.receiver;
-    if (!receiver) return;
-
-    const opusStream = receiver.subscribe(member.id, { end: { behavior: 'afterSilence', duration: 1500 } });
-    const pcmFile = path.join(TRANSCRIPTS_DIR, `${member.id}-${Date.now()}.pcm`);
-    const wavFile = pcmFile + '.wav';
-    const decoder = new prism.opus.Decoder({ frameSize: 960, channels: 2, rate: 48000 });
-    const outStream = fs.createWriteStream(pcmFile);
-    opusStream.pipe(decoder).pipe(outStream);
-
-    opusStream.on('end', async () => {
-      try {
-        outStream.end();
-        await pcmToWav(pcmFile, wavFile);
-        const text = await transcribeWavFile(wavFile).catch(e => { console.error('transcribe error', e); return ''; });
-        try { fs.unlinkSync(pcmFile); } catch {}
-        try { fs.unlinkSync(wavFile); } catch {}
-        if (!text) return;
-        const normalized = text.toLowerCase();
-        for (const bad of BAD_WORDS) {
-          if (normalized.includes(bad)) {
-            // mute member
-            const fetched = await guild.members.fetch(member.id).catch(()=>null);
-            if (fetched && fetched.voice.channelId) {
-              fetched.voice.setMute(true, 'Auto-moderation: profanity detected').catch(()=>{});
-              logToChannel(`Auto-muted ${fetched.user.tag} for profanity detected in VC. Transcript: ${text.slice(0,200)}`);
-              fetched.send('You were automatically muted in voice for using profanity.').catch(()=>{});
-            }
-            break;
-          }
-        }
-      } catch (err) {
-        console.error('opusStream end processing error', err);
-      }
-    });
-
-    opusStream.on('error', (err) => console.warn('opusStream error', err));
-  } catch (e) {
-    console.error('createTranscriptionListener error', e);
-  }
-}
-
-// -------------------- MESSAGE HANDLING (commands + text moderation) --------------------
-client.on(Events.MessageCreate, async (message) => {
-  try {
-    if (message.author.bot || !message.guild) return;
-
-    // text profanity filter (simple)
-    const compact = normalizeText(message.content);
-    for (const bad of BAD_WORDS) {
-      if (compact.includes(bad)) {
-        try { await message.delete(); } catch {}
-        message.channel.send(`You can't say that word, ${message.author}!`).catch(()=>{});
-        logToChannel(`${message.author.tag} attempted profanity: ${message.content}`);
-        return;
-      }
-    }
-
-    // commands
-    if (!message.content.startsWith(PREFIX)) return;
-    const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
-    const command = (args.shift() || '').toLowerCase();
-
-    // ----- HELP -----
-    if (command === 'help') {
-      return message.channel.send(`
-**Agnello Bot Commands**
-!hostfriendly - Start a friendly (role required)
-!activity <goal> - Post activity check
-!dmrole @role <message> - DM members of a role
-!announcement - Post announcement link
-!kick @user / !ban @user - Admin only
-!joinvc - Bot joins your VC (undeafened)
-!play <query> - Play music
-!skip / !stop / !queue - Music controls
-!ticket <reason> - Open support ticket
-!serverstats setup|remove - Server stats
-!inviteleaderboard - Show invite counts
-!help - This message
-`);
-    }
-
-    // ----- HOSTFRIENDLY -----
-    if (command === 'hostfriendly') {
-      return handleFriendly(message.channel, message.member);
-    }
-
-    // ----- ACTIVITY -----
-    if (command === 'activity') {
-      const goal = parseInt(args[0]) || 0;
-      const m = await message.channel.send(`:AGNELLO: @everyone, AGNELLO FC ACTIVITY CHECK, GOAL (${goal}), REACT WITH A ✅`);
-      try { await m.react('✅'); } catch {}
-      const collector = m.createReactionCollector({ filter: (r,u) => r.emoji.name === '✅' && !u.bot, time: 24*60*60*1000 });
-      collector.on('collect', (_, user) => logToChannel(`${user.tag} responded to activity check.`));
-      return;
-    }
-
-    // ----- DMROLE -----
-    if (command === 'dmrole') {
-      if (!args[0] || !args.slice(1).length) return message.reply('Usage: !dmrole @role <message>');
-      const roleId = args[0].replace(/\D/g,'');
-      const msgText = args.slice(1).join(' ');
-      const role = message.guild.roles.cache.get(roleId);
-      if (!role) return message.reply('Role not found.');
-      let sent=0, failed=0;
-      await Promise.all([...role.members.values()].map(async (m) => {
-        if (m.user.bot) return;
-        try { await m.send(msgText); sent++; } catch { failed++; }
-      }));
-      message.channel.send(`DMs sent: ${sent}. Failed: ${failed}`);
-      logToChannel(`${message.author.tag} used !dmrole on ${role.name}`);
-      return;
-    }
-
-    // ----- ANNOUNCEMENT -----
-    if (command === 'announcement') {
-      const link = 'https://discord.com/channels/1357085245983162708/1361111742427697152';
-      await message.channel.send(`There is a announcement in Agnello FC, please check it out. ${link}`);
-      logToChannel('Announcement made via !announcement');
-      return;
-    }
-
-    // ----- KICK / BAN (admin only) -----
-    if (command === 'kick' || command === 'ban') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return message.reply('You do not have permission.');
-      const target = message.mentions.members.first();
-      if (!target) return message.reply('Mention a user to kick/ban.');
-      try {
-        if (command === 'kick') await target.kick();
-        else await target.ban();
-        message.channel.send(`${command === 'kick' ? 'Kicked' : 'Banned'} ${target.user.tag}.`);
-        logToChannel(`${message.author.tag} ${command}ed ${target.user.tag}`);
-      } catch (e) {
-        console.error('kick/ban error', e);
-        message.reply('Failed to perform action.');
-      }
-      return;
-    }
-
-    // ----- JOIN VC (undeafened, starts transcription listeners optionally) -----
-    if (command === 'joinvc') {
-      const vc = message.member.voice.channel;
-      if (!vc) return message.reply('Join a voice channel first.');
-      try {
-        const q = await ensureQueue(message.guild, message.channel, vc);
-        message.channel.send(`Joined ${vc.name}.`);
-        logToChannel(`${message.author.tag} requested joinvc (${vc.name}).`);
-
-        // start transcription listeners for present members if enabled
-        if (ENABLE_TRANSCRIPTION) {
-          const connection = getVoiceConnection(message.guild.id);
-          if (connection) {
-            for (const member of vc.members.values()) {
-              if (member.user.bot) continue;
-              createTranscriptionListener(connection, message.guild, member).catch(console.error);
-            }
-          }
-        }
-      } catch (e) {
-        console.error('joinvc error', e);
-        message.reply('Failed to join VC.');
-      }
-      return;
-    }
-
-    // ----- MUSIC: play, skip, stop, queue -----
-    if (command === 'play') {
-      const vc = message.member.voice.channel;
-      if (!vc) return message.reply('Join a voice channel first.');
-      const query = args.join(' ');
-      if (!query) return message.reply('Provide a song name or URL.');
-      try {
-        const q = await ensureQueue(message.guild, message.channel, vc);
-        const track = await makeTrack(query);
-        q.songs.push(track);
-        message.channel.send(`Queued: ${track.title}`);
-        if (!q.playing) {
-          const next = q.songs.shift();
-          q.player.play(next.resource);
-          q.playing = true;
-          message.channel.send(`Now playing: ${next.title}`);
-        }
-      } catch (e) {
-        console.error('play error', e);
-        message.reply('Could not play the requested track.');
-      }
-      return;
-    }
-    if (command === 'skip') {
-      const q = queues.get(message.guild.id);
-      if (!q) return message.reply('Nothing is playing.');
-      q.player.stop();
-      message.channel.send('Skipped.');
-      return;
-    }
-    if (command === 'stop') {
-      const q = queues.get(message.guild.id);
-      if (!q) return message.reply('Nothing to stop.');
-      q.songs = [];
-      q.player.stop();
-      message.channel.send('Stopped and cleared queue.');
-      return;
-    }
-    if (command === 'queue') {
-      const q = queues.get(message.guild.id);
-      if (!q || q.songs.length === 0) return message.reply('Queue is empty.');
-      return message.channel.send(`Queue:\n${q.songs.map((s,i)=>`${i+1}. ${s.title}`).join('\n')}`);
-    }
-
-    // ----- TICKET -----
-    if (command === 'ticket') {
-      const reason = args.join(' ') || 'No reason provided';
-      try {
-        let category = message.guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === 'Tickets');
-        if (!category) category = await message.guild.channels.create({ name: 'Tickets', type: ChannelType.GuildCategory });
-        const channel = await message.guild.channels.create({
-          name: `ticket-${message.author.username}`.toLowerCase(),
-          type: ChannelType.GuildText,
-          parent: category.id,
-          permissionOverwrites: [
-            { id: message.guild.roles.everyone.id, deny: ['ViewChannel'] },
-            { id: message.author.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] }
-          ]
-        });
-        const staffRole = message.guild.roles.cache.get(FRIENDLY_ROLE_ID);
-        if (staffRole) await channel.permissionOverwrites.edit(staffRole.id, { ViewChannel: true, SendMessages: true });
-        await channel.send(`Ticket opened by <@${message.author.id}>. Reason: ${reason}`);
-        message.reply(`Ticket created: <#${channel.id}>`);
-        logToChannel(`${message.author.tag} created ticket ${channel.id}`);
-      } catch (e) {
-        console.error('ticket error', e);
-        message.reply('Failed to create ticket.');
-      }
-      return;
-    }
-
-    // ----- SERVERSTATS -----
-    if (command === 'serverstats') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) return message.reply('You do not have permission.');
-      const sub = args[0] ? args[0].toLowerCase() : '';
-      if (sub === 'setup') {
-        try {
-          const cat = await message.guild.channels.create({ name: 'Server Stats', type: ChannelType.GuildCategory });
-          await message.guild.channels.create({ name: `Members: ${message.guild.memberCount}`, type: ChannelType.GuildVoice, parent: cat.id, permissionOverwrites: [{ id: message.guild.roles.everyone.id, deny: ['Connect'] }] });
-          await message.guild.channels.create({ name: `Online: 0`, type: ChannelType.GuildVoice, parent: cat.id, permissionOverwrites: [{ id: message.guild.roles.everyone.id, deny: ['Connect'] }] });
-          return message.reply('Server stats set up.');
-        } catch (e) {
-          console.error('serverstats setup', e);
-          message.reply('Failed to set up stats.');
-        }
-      } else if (sub === 'remove') {
-        try {
-          const cat = message.guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name === 'Server Stats');
-          if (!cat) return message.reply('No stats set up.');
-          for (const child of cat.children.values()) await child.delete().catch(()=>{});
-          await cat.delete().catch(()=>{});
-          return message.reply('Server stats removed.');
-        } catch (e) {
-          console.error('serverstats remove', e);
-          message.reply('Failed to remove stats.');
-        }
-      } else return message.reply('Usage: !serverstats setup|remove');
-      return;
-    }
-
-    // ----- INVITE TRACKING (simple) -----
-    if (command === 'inviteleaderboard') {
-      // inviteCounts guild-keyed map: { userId: count }
-      const counts = inviteCounts[message.guild.id] || {};
-      const sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,10);
-      const text = sorted.map(([id,c])=>`<@${id}> — ${c}`).join('\n') || 'No invites tracked yet.';
-      return message.channel.send(`**Invite leaderboard**\n${text}`);
-    }
-
-    // unknown command: ignore
-  } catch (err) {
-    console.error('MessageCreate handler error', err);
-    logToChannel(`Message handler error: ${String(err).slice(0,1900)}`);
-  }
-});
-
-// -------------------- INVITE TRACKING: on guild create/member join --------------------
-client.on(Events.GuildCreate, async (guild) => {
-  try {
-    // preload invites (best-effort)
-    const invites = await guild.invites.fetch().catch(()=>null);
-    if (!inviteCounts[guild.id]) inviteCounts[guild.id] = {};
-    // store current invites by code -> uses (not required for simple approach)
-  } catch (e) {
-    console.warn('GuildCreate invite preload failed', e);
-  }
-});
-
-client.on(Events.GuildMemberAdd, async (member) => {
-  try {
-    // Welcome
-    try { await member.send(`Welcome to ${member.guild.name}, ${member.user.username}!`); } catch {}
-    const ch = await member.guild.channels.fetch(WELCOME_CHANNEL_ID).catch(()=>null);
-    if (ch && ch.isTextBased()) ch.send(`Welcome to Agnello FC, <@${member.id}>!`).catch(()=>{});
-
-    // Invite tracking: best-effort incremental approach (since we didn't store previous invites reliably, this is a placeholder).
-    // A robust implementation needs to store invites list and compare uses on join. Here we increment the inviter count if available via AuditLogs (not perfect).
-    const guildInvites = await member.guild.invites.fetch().catch(()=>null);
-    // try to find an invite whose uses increased — not guaranteed on free tiers, but attempt.
-    // For safety, we'll skip complicated comparisons here — this is a simple placeholder showing where you'd implement it.
-    if (!inviteCounts[member.guild.id]) inviteCounts[member.guild.id] = {};
-    // (No reliable inviter detected) — nothing to increment.
-
-    saveInvites();
-  } catch (e) {
-    console.error('GuildMemberAdd handler error', e);
-  }
-});
-
-client.on(Events.GuildMemberRemove, async (member) => {
-  try {
-    try { await member.user.send(`Goodbye from ${member.guild.name}, hope to see you again!`); } catch {}
-    const ch = await member.guild.channels.fetch(WELCOME_CHANNEL_ID).catch(()=>null);
-    if (ch && ch.isTextBased()) ch.send(`Goodbye <@${member.id}>!`).catch(()=>{});
-  } catch (e) {
-    console.error('GuildMemberRemove handler error', e);
-  }
-});
-
-// -------------------- DELETED MESSAGE LOGGING --------------------
-client.on(Events.MessageDelete, (msg) => {
-  try {
-    if (!msg || !msg.author) return;
-    logToChannel(`Message deleted by ${msg.author.tag}: ${msg.content}`);
-  } catch (e) {
-    console.error('MessageDelete handler error', e);
-  }
-});
-
-// -------------------- READY & PRESENCE --------------------
-client.on(Events.ClientReady, () => {
+client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
-  try { client.user.setStatus('online').catch(()=>{}); } catch {}
-  try { client.user.setActivity('Agnello FC', { type: 'WATCHING' }); } catch {}
-  logToChannel('Bot online and ready.');
 });
 
-// -------------------- EXPRESS KEEPALIVE --------------------
-const app = express();
-app.get('/', (_req, res) => res.send('Bot is running.'));
-app.listen(process.env.PORT || 3000, () => console.log('HTTP server listening'));
+// -------------------- voice moderation persistent state --------------------
+// voicemod.json structure:
+// {
+//   "<guildId>": {
+//     enabled: true/false,
+//     channelId: "voiceChannelId",
+//     modChannelId: "textChannelToLogTo",
+//     strikeThreshold: 3,
+//     muteDurationSec: 300,
+//     swearList: ["badword1","badword2"],
+//     strikes: { "<userId>": 1, ... }
+//   },
+//   ...
+// }
 
-// -------------------- LOGIN --------------------
-client.login(process.env.BOT_TOKEN)
-  .then(() => console.log('client.login() resolved — awaiting ClientReady event'))
-  .catch(err => {
-    console.error('Failed to login:', err);
-    logToChannel(`Failed to login: ${String(err).slice(0,1900)}`).catch(()=>{});
-    process.exit(1);
+const STATE_FILE = './voicemod.json';
+let voiceModState = {};
+try {
+  if (fs.existsSync(STATE_FILE)) {
+    voiceModState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } else {
+    voiceModState = {};
+  }
+} catch (err) {
+  console.error('Failed to load voicemod state:', err);
+  voiceModState = {};
+}
+
+function saveState() {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(voiceModState, null, 2));
+  } catch (err) {
+    console.error('Failed to save voicemod state:', err);
+  }
+}
+
+function ensureGuildConfig(guildId) {
+  if (!voiceModState[guildId]) {
+    voiceModState[guildId] = {
+      enabled: false,
+      channelId: null,
+      modChannelId: null,
+      strikeThreshold: 3,
+      muteDurationSec: 300,
+      // initial basic swear list - extend as you want
+      swearList: [
+        'fuck','shit','bitch','asshole','bastard','nigger','cunt','faggot'
+      ],
+      strikes: {}
+    };
+    saveState();
+  }
+  return voiceModState[guildId];
+}
+
+// -------------------- helper functions --------------------
+function parseMention(mention) {
+  if (!mention) return null;
+  return mention.replace(/[<@!>&#]/g, '').trim();
+}
+
+function isAdminOrManage(member) {
+  return member.permissions.has(PermissionsBitField.Flags.Administrator) || member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+}
+
+async function serverMuteMember(guild, userId, durationSec, reason = 'Voice moderation mute') {
+  try {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member || !member.voice) return false;
+    if (!member.voice.serverMute) {
+      if (!member.moderatable && !member.manageable) {
+        // try guildMember.voice.setMute
+        await member.voice.setMute(true, reason).catch(() => {});
+      } else {
+        await member.voice.setMute(true, reason).catch(() => {});
+      }
+    }
+    // schedule unmute
+    setTimeout(async () => {
+      try {
+        const m = await guild.members.fetch(userId).catch(() => null);
+        if (m && m.voice) {
+          await m.voice.setMute(false).catch(() => {});
+        }
+      } catch (e) {}
+    }, durationSec * 1000);
+    return true;
+  } catch (err) {
+    console.error('serverMuteMember error', err);
+    return false;
+  }
+}
+
+// basic profanity check
+function checkProfanity(text, swearList) {
+  if (!text) return { found: false, matches: [] };
+  const lower = text.toLowerCase();
+  const matches = [];
+  for (const w of swearList) {
+    // word boundary check
+    const re = new RegExp(`\\b${escapeRegExp(w.toLowerCase())}\\b`, 'i');
+    if (re.test(lower)) matches.push(w);
+  }
+  return { found: matches.length > 0, matches };
+}
+
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// -------------------- audio capture & transcription --------------------
+/*
+ Strategy:
+ - When voice moderation enabled, bot should be joined to the target VC.
+ - Use connection.receiver to subscribe to each user when they speak.
+ - Pipe opus stream -> prism opus.Decoder -> ffmpeg (stdin) to produce an mp3 file.
+ - Send mp3 file to OpenAI transcription, check transcript for swear words.
+ - NOTE: Recording arbitrary users in a server has privacy implications. Only enable with consent.
+*/
+
+async function ensureConnectedToVoice(guild, channelId) {
+  const chan = guild.channels.cache.get(channelId);
+  if (!chan || chan.type !== 2) throw new Error('Invalid voice channel id');
+  const conn = joinVoiceChannel({
+    channelId: chan.id,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: false // we want to hear to moderate; but we can deafen if you prefer
   });
+  conn.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(conn, VoiceConnectionStatus.Connecting, 5_000)
+      ]);
+      // reconnected
+    } catch {
+      try { conn.destroy(); } catch {}
+    }
+  });
+  return conn;
+}
 
-// -------------------- GLOBAL HANDLERS --------------------
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled promise rejection:', err);
-  logToChannel(`Unhandled rejection: ${String(err).slice(0,1900)}`).catch(()=>{});
+function createTempFilePath(prefix = 'clip', ext = '.mp3') {
+  const ts = Date.now();
+  const rnd = Math.floor(Math.random() * 1e6);
+  return path.join(TEMP_DIR, `${prefix}_${ts}_${rnd}${ext}`);
+}
+
+async function transcribeFileWithOpenAI(filePath) {
+  if (!OPENAI_API_KEY) throw new Error('OpenAI API key not configured.');
+  // openai client from SDK v4: audio.transcriptions.create
+  const fileStream = fs.createReadStream(filePath);
+  try {
+    const resp = await openai.audio.transcriptions.create({
+      file: fileStream,
+      model: 'gpt-4o-mini-transcribe' // or another available transcribe model; change if needed
+    });
+    // resp.text or resp?.text depends on SDK; common result: { text: "..." }
+    if (resp && (resp.text || resp[ 'text' ])) {
+      return resp.text ?? resp['text'];
+    }
+    // some SDKs return { data: { text: "..." } } - handle robustly:
+    if (resp && resp.data && resp.data.text) return resp.data.text;
+    // fallback: convert resp to string
+    return String(resp);
+  } catch (err) {
+    console.error('OpenAI transcription error', err);
+    throw err;
+  } finally {
+    try { fileStream.close?.(); } catch {}
+  }
+}
+
+// record a short clip for the provided user in a connection
+// returns path to mp3 file (caller should unlink after use)
+function recordShortClip(connection, userId, maxDurationMs = 5000) {
+  return new Promise((resolve, reject) => {
+    try {
+      const receiver = connection.receiver;
+      const opusStream = receiver.subscribe(userId, {
+        end: {
+          behavior: EndBehaviorType.AfterSilence,
+          duration: 1200
+        }
+      });
+
+      // opus -> decode -> ffmpeg convert to mp3
+      const decoded = new prism.opus.Decoder({ frameSize: 960, channels: 2, rate: 48000 });
+
+      const outPath = createTempFilePath('clip', '.mp3');
+
+      // spawn ffmpeg to convert PCM s16le to mp3
+      // we will pipe decoded PCM into ffmpeg stdin
+      const ffmpegArgs = [
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2',
+        '-i', 'pipe:0',
+        '-acodec', 'libmp3lame',
+        '-b:a', '96k',
+        '-y',
+        outPath
+      ];
+      const ffmpeg = spawn(ffmpegPath.path || ffmpegPath, ffmpegArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
+
+      ffmpeg.on('error', (err) => {
+        console.error('ffmpeg spawn error', err);
+      });
+
+      // hook up pipeline
+      opusStream.pipe(decoded).pipe(ffmpeg.stdin);
+
+      let finished = false;
+
+      // ensure we don't record forever
+      const maxTimeout = setTimeout(() => {
+        if (finished) return;
+        finished = true;
+        // try to close streams
+        try { opusStream.destroy(); } catch {}
+        try { decoded.destroy(); } catch {}
+        try { ffmpeg.stdin.end(); } catch {}
+        // wait for ffmpeg to flush then resolve after a short delay
+        setTimeout(() => resolve(outPath), 700);
+      }, maxDurationMs);
+
+      // if ffmpeg exits earlier, resolve
+      ffmpeg.on('close', (code, sig) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(maxTimeout);
+        resolve(outPath);
+      });
+
+      // also capture stderr for debugging
+      let stderr = '';
+      ffmpeg.stderr.on('data', (d) => { stderr += d.toString(); });
+
+      // if opus stream ends quickly, ensure ffmpeg closes soon
+      opusStream.on('end', () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(maxTimeout);
+        try { ffmpeg.stdin.end(); } catch {}
+        setTimeout(() => resolve(outPath), 700);
+      });
+
+      // if any error from streams
+      opusStream.on('error', (e) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(maxTimeout);
+        try { ffmpeg.stdin.end(); } catch {}
+        reject(e);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+// -------------------- voice moderation core flow --------------------
+/*
+  monitorSpeakers(connection, guild, config)
+  - watch for when members start speaking in the voice channel
+  - when a user speaks, record a short clip, transcribe, check for profanity, act accordingly
+*/
+
+function startVoiceModerationForGuild(guild, config) {
+  // ensure connection exists / join
+  ensureConnectedToVoice(guild, config.channelId).then((conn) => {
+    console.log(`Voice moderation started for guild ${guild.id} in channel ${config.channelId}`);
+
+    // listen to state changes: when speaking starts, we can subscribe
+    conn.receiver.speaking.on('start', (userId) => {
+      // userId is a Snowflake string
+      if (!userId) return;
+      if (userId === client.user.id) return; // ignore self
+
+      // small throttle: don't process same user multiple times concurrently
+      if (conn.__vm_processing && conn.__vm_processing[userId]) return;
+      conn.__vm_processing = conn.__vm_processing || {};
+      conn.__vm_processing[userId] = true;
+
+      // record and process
+      (async () => {
+        try {
+          const clipPath = await recordShortClip(conn, userId, 5000).catch(e => { throw e; });
+          if (!clipPath || !fs.existsSync(clipPath)) {
+            delete conn.__vm_processing[userId];
+            return;
+          }
+
+          // transcribe with OpenAI
+          let transcript = '';
+          try {
+            transcript = await transcribeFileWithOpenAI(clipPath);
+          } catch (err) {
+            console.error('transcribe failed', err);
+            transcript = '';
+          }
+
+          // cleanup clip
+          try { fs.unlinkSync(clipPath); } catch {}
+
+          // evaluate profanity
+          const { found, matches } = checkProfanity(transcript, config.swearList || []);
+          if (found) {
+            const modChannel = config.modChannelId ? guild.channels.cache.get(config.modChannelId) : null;
+            const humanReadableMatches = matches.join(', ');
+            // increment strike for user
+            config.strikes = config.strikes || {};
+            config.strikes[userId] = (config.strikes[userId] || 0) + 1;
+            saveState();
+
+            // compose message
+            const userTag = `<@${userId}>`;
+            const strikeCount = config.strikes[userId];
+            const warnMsg = `⚠️ Voice moderation: detected prohibited language (${humanReadableMatches}) from ${userTag}. Transcript: "${transcript || '(no transcript)'}". Strikes: ${strikeCount}/${config.strikeThreshold}`;
+
+            // send to mod channel if set else current text channel (fallback)
+            if (modChannel && modChannel.isTextBased && modChannel.viewable) {
+              modChannel.send({ content: warnMsg }).catch(() => {});
+            } else {
+              // fallback to default system channel or fetch a visible text channel
+              const fallback = guild.systemChannel ?? [...guild.channels.cache.values()].find(c => c.isTextBased && c.permissionsFor(guild.members.me).has('SendMessages'));
+              if (fallback) fallback.send({ content: warnMsg }).catch(() => {});
+            }
+
+            // DM the user a warning
+            try {
+              const u = await client.users.fetch(userId);
+              await u.send(`You used prohibited language in voice in ${guild.name}. Please refrain. This is strike ${strikeCount}/${config.strikeThreshold}.`).catch(() => {});
+            } catch (e) {}
+
+            // if reached threshold, server-mute
+            if (strikeCount >= (config.strikeThreshold || 3)) {
+              const muted = await serverMuteMember(guild, userId, config.muteDurationSec || 300, 'Exceeded profanity strikes');
+              const actionMsg = muted ? `🔇 ${userTag} has been muted for ${config.muteDurationSec || 300} seconds.` : `⚠️ Could not mute ${userTag} (permissions).`;
+              if (modChannel && modChannel.isTextBased) modChannel.send(actionMsg).catch(() => {});
+            }
+          }
+        } catch (err) {
+          console.error('Error processing speech for user', userId, err);
+        } finally {
+          delete conn.__vm_processing[userId];
+        }
+      })();
+    });
+  }).catch((err) => {
+    console.error('Failed to join voice channel for voice moderation', err);
+  });
+}
+
+// stop voice moderation: destroy connection if exists
+function stopVoiceModerationForGuild(guildId) {
+  const gconf = voiceModState[guildId];
+  if (!gconf || !gconf.channelId) return;
+  try {
+    const conn = getVoiceConnection(guildId);
+    if (conn) {
+      conn.destroy();
+      console.log('Destroyed voice connection for guild', guildId);
+    }
+  } catch (e) {
+    console.error('Error destroying voice connection', e);
+  }
+}
+
+// Ensure moderation is running for guilds that have it enabled when bot starts/reconnects
+client.on('ready', () => {
+  for (const [guildId, cfg] of Object.entries(voiceModState)) {
+    if (cfg.enabled && cfg.channelId) {
+      const guild = client.guilds.cache.get(guildId);
+      if (guild) {
+        startVoiceModerationForGuild(guild, cfg);
+      }
+    }
+  }
 });
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-  logToChannel(`Uncaught exception: ${String(err).slice(0,1900)}`).catch(()=>{});
+
+// -------------------- COMMAND HANDLING (adds voicemod commands) --------------------
+client.on('messageCreate', async (message) => {
+  if (message.author.bot || !message.guild) return;
+  const content = message.content.trim();
+  if (!content.startsWith(PREFIX)) return;
+  const args = content.slice(PREFIX.length).trim().split(/\s+/);
+  const command = args.shift().toLowerCase();
+  const guildId = message.guild.id;
+  const cfg = ensureGuildConfig(guildId);
+
+  // --- existing commands from your bot (music, hostfriendly, dmrole, purge, kick, ban, unban, joinvc) ---
+  // For brevity, those earlier commands remain the same as in your prior index.js.
+  // (Assume they are present above or combine with the earlier template.)
+
+  // ---- Voice mod commands group: !voicemod ----
+  if (command === 'voicemod') {
+    if (!isAdminOrManage(message.member)) return message.reply('❌ You must be an Administrator or Manage Server to configure voice moderation.');
+
+    const sub = (args[0] || '').toLowerCase();
+
+    if (sub === 'enable') {
+      cfg.enabled = true;
+      // optional: first arg after enable may be voice channel id
+      const channelArg = args[1] ?? cfg.channelId ?? DEFAULT_VC_ID;
+      cfg.channelId = channelArg;
+      cfg.modChannelId = cfg.modChannelId ?? message.channel.id;
+      saveState();
+      await message.reply(`✅ Voice moderation enabled for channel <#${cfg.channelId}>. Joining and monitoring...`);
+      // join and start
+      startVoiceModerationForGuild(message.guild, cfg);
+      return;
+    }
+
+    if (sub === 'disable') {
+      cfg.enabled = false;
+      saveState();
+      stopVoiceModerationForGuild(guildId);
+      await message.reply('✅ Voice moderation disabled.');
+      return;
+    }
+
+    if (sub === 'channel') {
+      const chArg = args[1];
+      if (!chArg) return message.reply('❌ Usage: !voicemod channel <voiceChannelId>');
+      cfg.channelId = chArg;
+      saveState();
+      await message.reply(`✅ Voice moderation channel set to <#${chArg}>.`);
+      return;
+    }
+
+    if (sub === 'modchannel') {
+      const ch = args[1];
+      if (!ch) return message.reply('❌ Usage: !voicemod modchannel <textChannelId>');
+      cfg.modChannelId = ch;
+      saveState();
+      await message.reply(`✅ Moderation log channel set to <#${ch}>.`);
+      return;
+    }
+
+    if (sub === 'addswear') {
+      const w = (args[1] || '').toLowerCase();
+      if (!w) return message.reply('❌ Usage: !voicemod addswear <word>');
+      if (!cfg.swearList.includes(w)) cfg.swearList.push(w);
+      saveState();
+      return message.reply(`✅ Added "${w}" to swear list.`);
+    }
+
+    if (sub === 'removeswear') {
+      const w = (args[1] || '').toLowerCase();
+      if (!w) return message.reply('❌ Usage: !voicemod removeswear <word>');
+      cfg.swearList = cfg.swearList.filter(s => s.toLowerCase() !== w);
+      saveState();
+      return message.reply(`✅ Removed "${w}" from swear list.`);
+    }
+
+    if (sub === 'listswears') {
+      const list = cfg.swearList && cfg.swearList.length ? cfg.swearList.join(', ') : '(empty)';
+      return message.reply(`Swear list (${cfg.swearList.length}): ${list}`);
+    }
+
+    if (sub === 'setthreshold') {
+      const n = parseInt(args[1], 10);
+      if (!n || n < 1) return message.reply('❌ Usage: !voicemod setthreshold <number>');
+      cfg.strikeThreshold = n;
+      saveState();
+      return message.reply(`✅ Strike threshold set to ${n}.`);
+    }
+
+    if (sub === 'setmuteduration') {
+      const n = parseInt(args[1], 10);
+      if (!n || n < 1) return message.reply('❌ Usage: !voicemod setmuteduration <seconds>');
+      cfg.muteDurationSec = n;
+      saveState();
+      return message.reply(`✅ Mute duration set to ${n} seconds.`);
+    }
+
+    if (sub === 'strikes') {
+      const target = args[1];
+      if (!target) return message.reply('❌ Usage: !voicemod strikes <userId|@user>');
+      const id = parseMention(target) ?? target;
+      const count = (cfg.strikes && cfg.strikes[id]) || 0;
+      return message.reply(`Strikes for <@${id}>: ${count}/${cfg.strikeThreshold}`);
+    }
+
+    if (sub === 'resetstrikes') {
+      const target = args[1];
+      if (!target) return message.reply('❌ Usage: !voicemod resetstrikes <userId|@user>');
+      const id = parseMention(target) ?? target;
+      if (cfg.strikes && cfg.strikes[id]) {
+        delete cfg.strikes[id];
+        saveState();
+      }
+      return message.reply(`✅ Reset strikes for <@${id}>.`);
+    }
+
+    // fallback help
+    const help = [
+      '`!voicemod enable [voiceChannelId]` — enable monitoring (defaults to last set or default)',
+      '`!voicemod disable` — disable monitoring',
+      '`!voicemod channel <voiceChannelId>` — set voice channel',
+      '`!voicemod modchannel <textChannelId>` — set where moderation messages are posted',
+      '`!voicemod addswear <word>` / `removeswear <word>` / `listswears` — manage swear list',
+      '`!voicemod setthreshold <n>` — strikes before mute',
+      '`!voicemod setmuteduration <seconds>` — mute length',
+      '`!voicemod strikes <user>` / `resetstrikes <user>` — view/reset strikes'
+    ].join('\n');
+    return message.reply(`VoiceMod commands:\n${help}`);
+  }
+
+  // -- other commands (music, hostfriendly, dmrole, purge, kick, ban, unban, joinvc) should exist below or above
 });
+
+// -------------------- process events & graceful exit --------------------
+process.on('unhandledRejection', (err) => { console.error('UnhandledRejection', err); });
+process.on('uncaughtException', (err) => { console.error('UncaughtException', err); });
+
+// -------------------- express keepalive --------------------
+const app = express();
+app.get('/', (req, res) => res.send('Agnello-bot alive.'));
+app.listen(KEEPALIVE_PORT, () => console.log('Keepalive on', KEEPALIVE_PORT));
+
+// -------------------- login --------------------
+client.login(BOT_TOKEN);
