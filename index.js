@@ -33,6 +33,35 @@ import {
   EndBehaviorType,
   getVoiceConnection
 } from '@discordjs/voice';
+// Concurrency limiter for OpenAI transcription
+const MAX_CONCURRENT_TRANSCRIPTS = 2; // tune: 1-3 is safe on Render
+let activeTranscripts = 0;
+const transcriptQueue = [];
+
+function enqueueTranscription(task) {
+  return new Promise((resolve, reject) => {
+    transcriptQueue.push({ task, resolve, reject });
+    processTranscriptQueue();
+  });
+}
+
+function processTranscriptQueue() {
+  if (activeTranscripts >= MAX_CONCURRENT_TRANSCRIPTS) return;
+  const entry = transcriptQueue.shift();
+  if (!entry) return;
+  activeTranscripts++;
+  entry.task()
+    .then((r) => {
+      activeTranscripts--;
+      entry.resolve(r);
+      process.nextTick(processTranscriptQueue);
+    })
+    .catch((err) => {
+      activeTranscripts--;
+      entry.reject(err);
+      process.nextTick(processTranscriptQueue);
+    });
+}
 
 // -------------------- BASIC CONFIG --------------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -366,14 +395,64 @@ function startVoiceModerationForGuild(guild, config) {
             return;
           }
 
-          // transcribe with OpenAI
-          let transcript = '';
-          try {
-            transcript = await transcribeFileWithOpenAI(clipPath);
-          } catch (err) {
-            console.error('transcribe failed', err);
-            transcript = '';
-          }
+         async function transcribeFileWithOpenAI(filePath) {
+  if (!OPENAI_API_KEY) throw new Error('OpenAI API key not configured.');
+  const attemptTranscribe = async () => {
+    const start = Date.now();
+    const fileStream = fs.createReadStream(filePath);
+    try {
+      // Use a model you have access to. whisper-1 is a stable transcription model.
+      const resp = await openai.audio.transcriptions.create({
+        file: fileStream,
+        model: 'whisper-1'
+      });
+      const dur = Date.now() - start;
+      console.log(`OpenAI transcription success (${dur}ms) for ${path.basename(filePath)}`);
+      // Try common shapes for response
+      if (resp && (resp.text || resp.data?.text)) return resp.text ?? resp.data.text;
+      if (typeof resp === 'string') return resp;
+      // fallback: return JSON string
+      return JSON.stringify(resp);
+    } catch (err) {
+      // attach diagnostics for logs
+      console.error('OpenAI transcription error', err?.message || err, {
+        code: err?.code ?? undefined,
+        cause: err?.cause ?? undefined
+      });
+      throw err;
+    } finally {
+      try { fileStream.close?.(); } catch {}
+    }
+  };
+
+  // Use an enqueue wrapper to limit concurrency
+  return enqueueTranscription(async () => {
+    const MAX_RETRIES = 3;
+    let attempt = 0;
+    while (attempt < MAX_RETRIES) {
+      attempt++;
+      try {
+        return await attemptTranscribe();
+      } catch (err) {
+        // If it's a permanent error (401/403/4xx other than 429), don't retry
+        const status = err?.status ?? err?.response?.status;
+        // node-fetch keeps info in err.cause or in the returned err — log it
+        if (status && status >= 400 && status < 500 && status !== 429) {
+          console.error(`Transcription permanent failure (status ${status}), aborting retries.`);
+          throw err;
+        }
+
+        // otherwise backoff and retry for network errors & 5xx & 429
+        const backoffMs = 500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
+        console.warn(`Transcription attempt ${attempt} failed, retrying after ${backoffMs}ms. Error: ${err?.message || err}`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
+    }
+    // final attempt failed
+    throw new Error('Transcription failed after retries.');
+  });
+}
+
 
           // cleanup clip
           try { fs.unlinkSync(clipPath); } catch {}
