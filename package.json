@@ -1,12 +1,13 @@
 {
   "name": "agnello-bot",
   "version": "1.0.0",
-  "description": "Agnello FC all-in-one Discord bot (moderation, music, friendly host, VC transcription via OpenAI, tickets, invites, stats, voice moderation).",
+  "description": "Agnello FC all-in-one Discord bot (music, moderation, voice moderation, hostfriendly, transcription).",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "postinstall": "node ./postinstall.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -33,12 +34,11 @@
     "bot",
     "music",
     "moderation",
-    "activity",
-    "friendly",
     "voice",
     "transcription",
     "openai",
-    "voicemod"
+    "voicemod",
+    "hostfriendly"
   ],
   "author": "You",
   "license": "MIT"
