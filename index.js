@@ -830,6 +830,27 @@ client.on('interactionCreate', async (interaction) => {
   }
 
 });
+async function transcribeWithRetry(filePath, maxRetries = 3) {
+  let attempt = 0;
+  const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  while (attempt < maxRetries) {
+    try {
+      const transcript = await transcribeFile(filePath);
+      return transcript;
+    } catch (error) {
+      attempt++;
+      if (attempt < maxRetries) {
+        const backoffTime = Math.pow(2, attempt) * 1000; // Exponential backoff
+        console.log(`Attempt ${attempt} failed. Retrying in ${backoffTime}ms...`);
+        await delay(backoffTime);
+      } else {
+        console.error('Max retries reached. Transcription failed.');
+        throw error;
+      }
+    }
+  }
+}
 
 // ------------------- READY -------------------
 client.once('ready', async () => {
