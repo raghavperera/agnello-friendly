@@ -116,6 +116,50 @@ function saveInvites() {
 function normalizeText(s) {
   return s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '');
 }
+// Inside your command handling section:
+if (message.content.startsWith('!purge')) {
+  if (!message.member.permissions.has('ManageMessages')) {
+    return message.reply("❌ You don't have permission to manage messages.");
+  }
+
+  const args = message.content.split(' ').slice(1);
+  const amount = parseInt(args[0]);
+
+  if (!amount || isNaN(amount) || amount < 1 || amount > 100) {
+    return message.reply("❌ Please provide a number between 1 and 100.");
+  }
+
+  try {
+    await message.channel.bulkDelete(amount, true);
+    message.channel.send(`✅ Deleted ${amount} messages.`).then(msg => {
+      setTimeout(() => msg.delete(), 5000); // auto-delete the confirmation
+    });
+  } catch (err) {
+    console.error(err);
+    message.reply('❌ Could not delete messages.');
+  }
+}
+if (message.content.startsWith('!unban')) {
+  if (!message.member.permissions.has('BanMembers')) {
+    return message.reply("❌ You don't have permission to unban members.");
+  }
+
+  const args = message.content.split(' ').slice(1);
+  const userId = args[0];
+  if (!userId) return message.reply("❌ Please provide the user ID to unban.");
+
+  try {
+    const banList = await message.guild.bans.fetch();
+    const bannedUser = banList.get(userId);
+    if (!bannedUser) return message.reply("❌ That user is not banned.");
+
+    await message.guild.members.unban(userId);
+    message.channel.send(`✅ Successfully unbanned <@${userId}>.`);
+  } catch (err) {
+    console.error(err);
+    message.reply("❌ Failed to unban that user. Make sure the ID is correct.");
+  }
+}
 
 // -------------------- FRIENDLY HOSTER --------------------
 async function handleFriendly(channel, hostMember) {
