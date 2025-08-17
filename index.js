@@ -233,6 +233,34 @@ client.on("messageCreate", async message => {
         });
     }
 });
+// ==========================
+// VC Auto-Mute Test Command
+// ==========================
+client.on("messageCreate", async message => {
+    if (message.content === "!testvc") {
+        const member = message.member;
+        const guild = message.guild;
+
+        if (!member.voice.channel) {
+            return message.reply("❌ You need to be in a VC to test auto-mute!");
+        }
+
+        try {
+            // Simulate auto mute
+            await member.voice.setMute(true, "Test Auto VC Mute");
+            logAction("Test Auto VC Mute", `${member.user.tag} was auto-muted in VC (test)`, guild);
+            message.channel.send(`✅ ${member.user.tag} has been auto-muted for test purposes.`);
+
+            // Simulate 10s audio clip logging
+            const filePath = `./vc_logs/${member.id}_test_${Date.now()}.pcm`;
+            fs.writeFileSync(filePath, Buffer.from("Test audio clip content"));
+            logAction("VC Clip Saved (Test)", `Test 10s clip for ${member.user.tag} saved at ${filePath}`, guild);
+        } catch (err) {
+            console.error(err);
+            message.channel.send("❌ Failed to auto-mute for test.");
+        }
+    }
+});
 
 // ==========================
 // Automatic VC Moderation
