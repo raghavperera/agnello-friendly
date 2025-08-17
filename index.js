@@ -1,321 +1,635 @@
 // ==========================
-// Agnello FC Bot - Full Index.js
+// Agnello FC - index.js
+// All-in-one bot: moderation, hostfriendly, activity check, music, dmrole,
+// auto ✅ for @everyone/@here, optional voice auto-moderation (disabled by default for Render).
 // ==========================
 
-// --- Imports ---
-import { Client, GatewayIntentBits, Partials, PermissionsBitField, EmbedBuilder } from "discord.js";
-import { joinVoiceChannel, entersState, VoiceConnectionStatus, createAudioPlayer, createAudioResource, AudioPlayerStatus } from "@discordjs/voice";
-import prism from "prism-media";
+/**
+ * IMPORTANT:
+ * - By default voice features are disabled (to avoid Render UDP errors).
+ * - To enable voice features (auto mute, recording, music in VC), set ENABLE_VOICE=true
+ *   and run on a machine that allows UDP (VPS / dedicated server).
+ *
+ * ENV VARS:
+ *  - TOKEN (required)
+ *  - LOG_CHANNEL_ID (optional, defaults to 1362214241091981452)
+ *  - VOICE_CHANNEL_ID (optional - default used for joinvc)
+ *  - ENABLE_VOICE (optional, "true" to enable voice features)
+ *  - OPENAI_API_KEY (optional for transcription)
+ */
+
 import fs from "fs";
+import path from "path";
+import process from "process";
+import fetch from "node-fetch";
+import { pipeline } from "stream/promises";
+import prism from "prism-media";
 import ytdl from "ytdl-core";
 
-// --- Config ---
-const TOKEN = process.env.TOKEN;
-const LOG_CHANNEL_ID = "1362214241091981452";
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  EmbedBuilder,
+  PermissionsBitField,
+  Collection,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+} from "discord.js";
 
-// --- Client Setup ---
+import {
+  joinVoiceChannel,
+  getVoiceConnection,
+  entersState,
+  VoiceConnectionStatus,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+} from "@discordjs/voice";
+
+// ---------- Config ----------
+const TOKEN = process.env.TOKEN || process.env.DISCORD_TOKEN || "";
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || "1362214241091981452";
+const VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID || "1368359914145058956";
+const ENABLE_VOICE = (process.env.ENABLE_VOICE || "false").toLowerCase() === "true";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
+const PORT = process.env.PORT || 3000;
+
+// Create logs folder if missing
+if (!fs.existsSync("./vc_logs")) fs.mkdirSync("./vc_logs");
+
+// ---------- Client Setup ----------
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMembers
-    ],
-    partials: [Partials.Channel]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessageReactions,
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-// --- Global Music Queue ---
-const queue = new Map(); // guildId => { connection, player, songs }
+client.commands = new Collection();
+client.queue = new Map(); // music queues
+client.hostfriendlies = new Map(); // active hostfriendly sessions
 
-// --- Swear words list (example, you can expand) ---
-const swears = ["fuck","shit","bitch","ass","damn","bastard","cunt","dick","pussy"];
+// ---------- Keepalive Server ----------
+import express from "express";
+const app = express();
+app.get("/", (req, res) => res.send("Agnello FC Bot is alive"));
+app.listen(PORT, () => console.log(`Keepalive server listening on ${PORT}`));
 
-// ==========================
-// Logging Helper
-// ==========================
-function logAction(action, details, guild) {
-    const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
-    if (logChannel) {
-        const embed = new EmbedBuilder()
-            .setColor(0xff0000)
-            .setTitle(`🔔 ${action}`)
-            .setDescription(details)
-            .setTimestamp();
-        logChannel.send({ embeds: [embed] });
-    }
-    console.log(`[LOG] ${action} - ${details}`);
+// ---------- Utilities ----------
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-// ==========================
-// Moderation Commands
-// ==========================
-client.on("messageCreate", async message => {
-    if (!message.content.startsWith("!")) return;
-    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+function safeLogToChannel(guild, title, desc) {
+  try {
+    const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
+    if (logChannel && logChannel.isTextBased()) {
+      const embed = new EmbedBuilder().setTitle(title).setDescription(desc).setColor(0xff0000).setTimestamp();
+      logChannel.send({ embeds: [embed] }).catch((e) => console.error("Failed to send log:", e));
+    }
+  } catch (e) {
+    console.error("safeLogToChannel error:", e);
+  }
+  // Also console
+  console.log(`[LOG] ${title} - ${desc}`);
+}
 
-    const args = message.content.split(" ");
-    const command = args[0].toLowerCase();
+function containsSwear(text, swearList) {
+  if (!text) return false;
+  const lowered = text.toLowerCase();
+  return swearList.some((w) => {
+    if (!w) return false;
+    return lowered.includes(w.toLowerCase());
+  });
+}
 
-    if(command === "!ban") {
-        const user = message.mentions.members.first();
-        if(user) {
-            await user.ban({ reason: "Banned by command" });
-            logAction("Ban", `${user.user.tag} was banned by ${message.author.tag}`, message.guild);
-        }
+// Basic embedded swear list (you can replace by requiring ./swears.js)
+const swears = [
+  "fuck",
+  "shit",
+  "bitch",
+  "ass",
+  "damn",
+  "bastard",
+  "cunt",
+  "dick",
+  "pussy",
+  "nigger",
+  "faggot",
+  // expand / replace with a more comprehensive file as needed
+];
+
+// ---------- Command Helpers ----------
+async function sendDMSafe(member, content) {
+  try {
+    await member.send(content);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ---------- Moderation Commands (prefix-style) ----------
+const PREFIX = "!";
+
+client.on("messageCreate", async (message) => {
+  if (!message.guild || message.author.bot || !message.content.startsWith(PREFIX)) return;
+  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+  const cmd = args.shift().toLowerCase();
+
+  // Permission check helpers
+  const hasAdmin = message.member.permissions.has(PermissionsBitField.Flags.Administrator);
+  const hasBanPerm = message.member.permissions.has(PermissionsBitField.Flags.BanMembers);
+  const hasKickPerm = message.member.permissions.has(PermissionsBitField.Flags.KickMembers);
+  const hasModPerm = message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers);
+
+  try {
+    // --- ban ---
+    if (cmd === "ban") {
+      if (!hasBanPerm) return message.reply("❌ You don't have permission to ban.");
+      const member = message.mentions.members.first();
+      if (!member) return message.reply("⚠️ Mention a user to ban.");
+      const reason = args.join(" ") || "No reason provided";
+      await member.ban({ reason });
+      safeLogToChannel(message.guild, "Ban", `${message.author.tag} banned ${member.user.tag} | ${reason}`);
+      return message.channel.send(`✅ Banned ${member.user.tag}`);
     }
 
-    if(command === "!unban") {
-        const userId = args[1];
-        if(userId) {
-            await message.guild.bans.remove(userId);
-            logAction("Unban", `${userId} was unbanned by ${message.author.tag}`, message.guild);
-        }
+    // --- unban ---
+    if (cmd === "unban") {
+      if (!hasBanPerm) return message.reply("❌ You don't have permission to unban.");
+      const id = args[0];
+      if (!id) return message.reply("⚠️ Provide a user ID to unban.");
+      await message.guild.members.unban(id);
+      safeLogToChannel(message.guild, "Unban", `${message.author.tag} unbanned ${id}`);
+      return message.channel.send(`✅ Unbanned <@${id}>`);
     }
 
-    if(command === "!kick") {
-        const user = message.mentions.members.first();
-        if(user) {
-            await user.kick("Kicked by command");
-            logAction("Kick", `${user.user.tag} was kicked by ${message.author.tag}`, message.guild);
-        }
+    // --- kick ---
+    if (cmd === "kick") {
+      if (!hasKickPerm) return message.reply("❌ You don't have permission to kick.");
+      const member = message.mentions.members.first();
+      if (!member) return message.reply("⚠️ Mention a user to kick.");
+      const reason = args.join(" ") || "No reason provided";
+      await member.kick(reason);
+      safeLogToChannel(message.guild, "Kick", `${message.author.tag} kicked ${member.user.tag} | ${reason}`);
+      return message.channel.send(`✅ Kicked ${member.user.tag}`);
     }
 
-    if(command === "!timeout") {
-        const user = message.mentions.members.first();
-        const duration = parseInt(args[2]) || 10;
-        if(user) {
-            await user.timeout(duration * 1000, "Timeout by command");
-            logAction("Timeout", `${user.user.tag} timed out for ${duration}s by ${message.author.tag}`, message.guild);
-        }
+    // --- timeout ---
+    if (cmd === "timeout") {
+      if (!hasModPerm) return message.reply("❌ You don't have permission to timeout.");
+      const member = message.mentions.members.first();
+      const duration = parseInt(args[1]) || parseInt(args[0]) || 60; // seconds
+      if (!member) return message.reply("⚠️ Mention a user to timeout.");
+      await member.timeout(duration * 1000, `Timeout by ${message.author.tag}`);
+      safeLogToChannel(message.guild, "Timeout", `${message.author.tag} timed out ${member.user.tag} for ${duration}s`);
+      return message.channel.send(`⏱ Timed out ${member.user.tag} for ${duration}s`);
     }
 
-    if(command === "!vmute") {
-        const user = message.mentions.members.first();
-        if(user && user.voice.channel) {
-            await user.voice.setMute(true, "Muted by command");
-            logAction("Voice Mute", `${user.user.tag} was voice muted`, message.guild);
-        }
+    // --- vmute (manual voice mute) ---
+    if (cmd === "vmute") {
+      if (!hasModPerm) return message.reply("❌ You don't have permission to use vmute.");
+      const member = message.mentions.members.first();
+      if (!member) return message.reply("⚠️ Mention a user to vmute.");
+      if (!member.voice.channel) return message.reply("⚠️ That user is not in voice.");
+      await member.voice.setMute(true, `Muted by ${message.author.tag}`);
+      safeLogToChannel(message.guild, "Voice Mute", `${message.author.tag} muted ${member.user.tag} manually`);
+      return message.channel.send(`🔇 ${member.user.tag} muted in VC`);
     }
-});
 
-// ==========================
-// Music Commands
-// ==========================
-client.on("messageCreate", async message => {
-    if(!message.content.startsWith("!")) return;
+    // --- dmrole (prefix): !dmrole <roleId> <message...> ---
+    if (cmd === "dmrole") {
+      if (!hasAdmin) return message.reply("❌ Only admins can use dmrole.");
+      const roleId = args.shift();
+      const content = args.join(" ");
+      if (!roleId || !content) return message.reply("Usage: `!dmrole <roleId> <message>`");
+      const role = message.guild.roles.cache.get(roleId);
+      if (!role) return message.reply("⚠️ Role not found.");
+      const failed = [];
+      for (const member of role.members.values()) {
+        const ok = await sendDMSafe(member, content);
+        if (!ok) failed.push(member.user.tag);
+      }
+      const result = failed.length ? `Failed DM: ${failed.join(", ")}` : "All DMs sent.";
+      safeLogToChannel(message.guild, "DM Role", `DM to role ${role.name} by ${message.author.tag} | Failed: ${failed.length}`);
+      return message.channel.send(result);
+    }
 
-    const args = message.content.split(" ");
-    const command = args[0].toLowerCase();
-    const serverQueue = queue.get(message.guild.id);
+    // --- play / skip / stop / queue (music) ---
+    if (cmd === "play" || cmd === "skip" || cmd === "stop" || cmd === "queue" || cmd === "nowplaying") {
+      // Music only works when ENABLE_VOICE=true and environment supports UDP.
+      if (!ENABLE_VOICE) return message.reply("⚠️ Voice/music features disabled in this host. Set ENABLE_VOICE=true on a UDP-enabled host to enable.");
+      // handle music commands further below (we'll route)
+    }
 
-    if(command === "!play") {
-        const url = args[1];
-        if(!url) return message.reply("❌ Please provide a YouTube URL");
-        const voiceChannel = message.member.voice.channel;
-        if(!voiceChannel) return message.reply("❌ You must be in a VC!");
+    // --- hostfriendly (simple starter) ---
+    if (cmd === "hostfriendly") {
+      // Permission for hosting: Admins or role "Friendlies Department"
+      const canHost =
+        message.member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+        message.member.roles.cache.some((r) => r.name === "Friendlies Department");
+      if (!canHost) return message.reply("❌ You cannot host a friendly.");
+      // allow optional starting position arg
+      const startPos = args[0] ? args[0].toUpperCase() : null;
+      return startHostFriendly(message, message.author, startPos);
+    }
 
-        let connection = joinVoiceChannel({
-            channelId: voiceChannel.id,
-            guildId: message.guild.id,
-            adapterCreator: message.guild.voiceAdapterCreator
+    // --- activitycheck ---
+    if (cmd === "activitycheck") {
+      // Usage: !activitycheck <goal>
+      const goal = parseInt(args[0]) || 40;
+      return startActivityCheck(message.channel, message.author, goal);
+    }
+
+    // --- joinvc (command for bot to join user's VC) ---
+    if (cmd === "joinvc") {
+      if (!ENABLE_VOICE) return message.reply("⚠️ Voice disabled in this host.");
+      const voiceChannel = message.member.voice.channel;
+      if (!voiceChannel) return message.reply("⚠️ Join a VC first or set VOICE_CHANNEL_ID env.");
+      try {
+        const connection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: message.guild.id,
+          adapterCreator: message.guild.voiceAdapterCreator,
         });
-
-        if(!serverQueue) {
-            const player = createAudioPlayer();
-            const song = { url };
-            queue.set(message.guild.id, { connection, player, songs: [song] });
-            playSong(message.guild.id);
-            logAction("Music", `Started playing ${url}`, message.guild);
-        } else {
-            serverQueue.songs.push({ url });
-            message.channel.send(`🎶 Added to queue: ${url}`);
-        }
+        // handle networking errors gracefully
+        connection.on("error", (err) => {
+          console.error("Voice connection error:", err);
+        });
+        await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+        message.channel.send("✅ Joined VC. Monitoring enabled.");
+        safeLogToChannel(message.guild, "JoinVC", `${client.user.tag} joined ${voiceChannel.name}`);
+      } catch (err) {
+        console.error("Failed to join VC:", err);
+        return message.reply("❌ Failed to join VC (this host may block UDP).");
+      }
     }
 
-    if(command === "!skip") {
-        if(!serverQueue) return;
-        serverQueue.player.stop();
-        message.channel.send("⏭️ Skipped!");
+    // --- leavevc ---
+    if (cmd === "leavevc") {
+      if (!ENABLE_VOICE) return message.reply("⚠️ Voice disabled.");
+      const conn = getVoiceConnection(message.guild.id);
+      if (conn) {
+        conn.destroy();
+        return message.channel.send("✅ Left voice channel.");
+      } else {
+        return message.channel.send("⚠️ Not connected to a VC.");
+      }
     }
-
-    if(command === "!stop") {
-        if(!serverQueue) return;
-        serverQueue.songs = [];
-        serverQueue.player.stop();
-        queue.delete(message.guild.id);
-        message.channel.send("🛑 Stopped!");
-    }
+  } catch (err) {
+    console.error("Command processing error:", err);
+  }
 });
 
-function playSong(guildId) {
-    const serverQueue = queue.get(guildId);
-    if(!serverQueue || serverQueue.songs.length === 0) {
-        queue.delete(guildId);
-        return;
-    }
-    const song = serverQueue.songs.shift();
-    const stream = ytdl(song.url, { filter: "audioonly" });
+// ---------- Music Implementation (requires ENABLE_VOICE=true) ----------
+async function playSong(guildId) {
+  const serverQueue = client.queue.get(guildId);
+  if (!serverQueue) {
+    client.queue.delete(guildId);
+    return;
+  }
+  if (!serverQueue.songs.length) {
+    // no more songs
+    serverQueue.player.stop();
+    serverQueue.connection.destroy();
+    client.queue.delete(guildId);
+    return;
+  }
+  const song = serverQueue.songs.shift();
+  try {
+    const stream = ytdl(song.url, { filter: "audioonly", highWaterMark: 1 << 25 });
     const resource = createAudioResource(stream);
     serverQueue.player.play(resource);
     serverQueue.connection.subscribe(serverQueue.player);
+    serverQueue.textChannel.send(`🎶 Now playing: ${song.url}`).catch(() => {});
+  } catch (e) {
+    console.error("playSong error:", e);
+    serverQueue.textChannel.send("❌ Failed to play that track.");
+  }
 
-    serverQueue.player.once(AudioPlayerStatus.Idle, () => {
-        playSong(guildId);
-    });
+  serverQueue.player.once(AudioPlayerStatus.Idle, () => {
+    // next song
+    setImmediate(() => playSong(guildId));
+  });
 }
 
-// ==========================
-// Hostfriendly Reaction Role
-// ==========================
-client.on("messageCreate", async message => {
-    if(message.content.toLowerCase() === "!hostfriendly") {
-        const embed = new EmbedBuilder()
-            .setColor(0x00AE86)
-            .setTitle("__**AGNELLO FC 7v7 FRIENDLY**__")
-            .setDescription(
-                `React 1️⃣ → GK\n` +
-                `React 2️⃣ → CB\n` +
-                `React 3️⃣ → CB2\n` +
-                `React 4️⃣ → CM\n` +
-                `React 5️⃣ → LW\n` +
-                `React 6️⃣ → RW\n` +
-                `React 7️⃣ → ST\n` +
-                `@everyone`
-            )
-            .setFooter({ text: "Powered by Agnello FC Bot" })
-            .setTimestamp();
+// Hook into voice state updates to auto-start recording when needed only if ENABLE_VOICE true.
+// NOTE: On hosts like Render, this is disabled by default.
+if (ENABLE_VOICE) {
+  client.on("voiceStateUpdate", async (oldState, newState) => {
+    // Only respond to joins or speaking changes (we'll attempt to subscribe)
+    try {
+      // If user joined a voice channel
+      if (!oldState.channelId && newState.channelId) {
+        safeLogToChannel(newState.guild, "VC Join", `${newState.member.user.tag} joined ${newState.channel.name}`);
+      }
 
-        const sent = await message.channel.send({ content: "@everyone", embeds: [embed] });
-        const emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣"];
-        for(const e of emojis) await sent.react(e);
+      // If user left vc
+      if (oldState.channelId && !newState.channelId) {
+        safeLogToChannel(newState.guild, "VC Leave", `${newState.member.user.tag} left VC`);
+      }
 
-        const claimed = {};
-        const collector = sent.createReactionCollector({ filter: (r,u) => !u.bot });
+      // If user moved channels, we might want to monitor new channel events.
 
-        collector.on("collect", async (reaction, user) => {
-            const member = await message.guild.members.fetch(user.id);
-            if(Object.values(claimed).includes(user.id)) return;
-            const index = emojis.indexOf(reaction.emoji.name);
-            if(index > -1) {
-                claimed[index] = user.id;
-                message.channel.send(`✅ ${reaction.emoji.name} confirmed for <@${user.id}>`);
+      // The heavy auto-moderation logic requires the bot to be in the same VC and have a voice connection.
+      // We only proceed if the bot is already connected to that guild's voice channel.
+      const connection = getVoiceConnection(newState.guild.id);
+      if (!connection) return; // bot not in VC; do nothing
+
+      // Try subscribing to the user stream (this may throw if permissions/environment disallow)
+      const receiver = connection.receiver;
+      if (!receiver) return;
+
+      // Subscribe to the user's opus packets -> convert to raw PCM
+      const opusStream = receiver.subscribe(newState.id, { end: { behavior: "silence", duration: 5000 } });
+
+      const pcmChunks = [];
+      opusStream.on("data", (chunk) => {
+        pcmChunks.push(chunk);
+      });
+
+      opusStream.on("end", async () => {
+        try {
+          if (!pcmChunks.length) return;
+          const buffer = Buffer.concat(pcmChunks);
+          const filePath = `./vc_logs/${newState.id}_${Date.now()}.pcm`;
+          fs.writeFileSync(filePath, buffer);
+          safeLogToChannel(newState.guild, "VC Clip Saved", `Saved clip for ${newState.member.user.tag}: ${filePath}`);
+
+          // Optional: transcribe if OPENAI_API_KEY present
+          let transcription = null;
+          if (OPENAI_API_KEY) {
+            try {
+              transcription = await transcribeWithOpenAI(filePath);
+            } catch (e) {
+              console.error("Transcription failed:", e);
             }
-        });
+          }
 
-        collector.on("end", () => {
-            const final = emojis.map((e,i) => `${e} → <@${claimed[i] || "Not claimed"}>`).join("\n");
-            message.channel.send(`**FINAL LINEUP:**\n${final}`);
-        });
-    }
-});
-
-// ==========================
-// Activity Check
-// ==========================
-client.on("messageCreate", async message => {
-    if(message.content.startsWith("!activitycheck")) {
-        const args = message.content.split(" ");
-        const goal = parseInt(args[1]) || 10;
-        const embed = new EmbedBuilder()
-            .setColor(0x00FF00)
-            .setTitle("__**AGNELLO FC Activity Check**__")
-            .setDescription(`React with ✅\nGoal: ${goal}\nDuration: 1 Day\n@everyone`)
-            .setTimestamp();
-
-        const sent = await message.channel.send({ content: "@everyone", embeds: [embed] });
-        await sent.react("✅");
-
-        const filter = (reaction,user) => reaction.emoji.name === "✅" && !user.bot;
-        const collector = sent.createReactionCollector({ filter, time: 24*60*60*1000 });
-        collector.on("collect", r => {
-            if(r.count - 1 >= goal) message.channel.send(`🎉 Activity Check goal reached!`);
-        });
-    }
-});
-// ==========================
-// VC Auto-Mute Test Command
-// ==========================
-client.on("messageCreate", async message => {
-    if (message.content === "!testvc") {
-        const member = message.member;
-        const guild = message.guild;
-
-        if (!member.voice.channel) {
-            return message.reply("❌ You need to be in a VC to test auto-mute!");
+          // if transcription contains swear words OR we want to check raw buffer for keywords (impractical),
+          // we use the transcription
+          if (transcription && containsSwear(transcription, swears)) {
+            // Mute member
+            try {
+              await newState.member.voice.setMute(true, "Auto-mute: swear detected");
+              safeLogToChannel(
+                newState.guild,
+                "Auto VC Mute",
+                `${newState.member.user.tag} was auto-muted. Transcription: ${transcription}`
+              );
+              // send clip and transcription to log channel
+              const logCh = newState.guild.channels.cache.get(LOG_CHANNEL_ID);
+              if (logCh && logCh.isTextBased()) {
+                await logCh.send({
+                  content: `**Voice Moderation:** <@${newState.id}> muted. Transcription:\n\`${transcription}\``,
+                  files: [filePath],
+                });
+              }
+            } catch (err) {
+              console.error("Failed to auto-mute member:", err);
+            }
+          } else {
+            // If transcription missing but we want to do automatic muting on ANY audio detected,
+            // you could uncomment the following to mute all talking users (be careful):
+            // await newState.member.voice.setMute(true, "Auto-mute: talking detected");
+          }
+        } catch (e) {
+          console.error("Error handling pcm data:", e);
         }
+      });
 
-        try {
-            // Simulate auto mute
-            await member.voice.setMute(true, "Test Auto VC Mute");
-            logAction("Test Auto VC Mute", `${member.user.tag} was auto-muted in VC (test)`, guild);
-            message.channel.send(`✅ ${member.user.tag} has been auto-muted for test purposes.`);
-
-            // Simulate 10s audio clip logging
-            const filePath = `./vc_logs/${member.id}_test_${Date.now()}.pcm`;
-            fs.writeFileSync(filePath, Buffer.from("Test audio clip content"));
-            logAction("VC Clip Saved (Test)", `Test 10s clip for ${member.user.tag} saved at ${filePath}`, guild);
-        } catch (err) {
-            console.error(err);
-            message.channel.send("❌ Failed to auto-mute for test.");
-        }
+      opusStream.on("error", (err) => {
+        console.error("opusStream error:", err);
+      });
+    } catch (err) {
+      console.error("voiceStateUpdate handler error:", err);
     }
+  });
+} else {
+  // When voice is disabled, ensure we don't attempt to join or subscribe anywhere.
+  client.on("voiceStateUpdate", (o, n) => {
+    // no-op when voice disabled to avoid Render crash
+  });
+}
+
+// ---------- Helper: Transcribe with OpenAI (optional) ----------
+async function transcribeWithOpenAI(filePath) {
+  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+  // Using OpenAI's generic transcription endpoint (this code may require adjustments if API changed)
+  const url = "https://api.openai.com/v1/audio/transcriptions";
+  const form = new (await import("form-data")).default();
+  form.append("model", "whisper-1");
+  form.append("file", fs.createReadStream(filePath));
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: form,
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Transcription API error: ${res.status} ${txt}`);
+  }
+  const json = await res.json();
+  return json.text || null;
+}
+
+// ---------- Hostfriendly: live reaction-role friendly (one embed, updates) ----------
+async function startHostFriendly(message, hostUser, hostPosition = null) {
+  const positions = ["GK", "CB", "CB2", "CM", "LW", "RW", "ST"];
+  const emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣"];
+  const claimed = Array(positions.length).fill(null); // store user ids
+  const userClaim = {}; // userId -> index
+
+  // Pre-assign host position if valid
+  if (hostPosition) {
+    const idx = positions.indexOf(hostPosition.toUpperCase());
+    if (idx !== -1) {
+      claimed[idx] = hostUser.id;
+      userClaim[hostUser.id] = idx;
+    }
+  }
+
+  const buildDesc = () => {
+    let out = "";
+    positions.forEach((p, i) => {
+      out += `> **${emojis[i]} ${p}:** _${claimed[i] ? `<@${claimed[i]}>` : "empty"}_\n`;
+    });
+    out += "\n||@everyone||"; // subtle everyone ping inline (double-pipe so it's small)
+    return out;
+  };
+
+  const embed = new EmbedBuilder().setTitle("__**AGNELLO FC 7v7 FRIENDLY**__").setDescription(buildDesc()).setColor(0x0099ff).setFooter({ text: "React to claim a position" });
+
+  const sent = await message.channel.send({ content: "@everyone", embeds: [embed] });
+  for (const e of emojis) await sent.react(e);
+
+  const filter = (reaction, user) => emojis.includes(reaction.emoji.name) && !user.bot;
+  const collector = sent.createReactionCollector({ filter, time: 10 * 60 * 1000, dispose: true });
+
+  collector.on("collect", async (reaction, user) => {
+    try {
+      const idx = emojis.indexOf(reaction.emoji.name);
+      // if user already has a claim, remove their previous claim
+      if (userClaim[user.id] !== undefined && userClaim[user.id] !== idx) {
+        const previousIndex = userClaim[user.id];
+        claimed[previousIndex] = null;
+        userClaim[user.id] = undefined;
+      }
+      // if already claimed by someone else
+      if (claimed[idx] && claimed[idx] !== user.id) {
+        // remove reaction (they tried to take already-claimed spot)
+        await reaction.users.remove(user.id);
+        await message.channel.send(`${user}, that position is already claimed.`);
+        return;
+      }
+      // assign
+      claimed[idx] = user.id;
+      userClaim[user.id] = idx;
+      safeLogToChannel(message.guild, "Hostfriendly Claim", `${user.tag} claimed ${positions[idx]}`, message.guild);
+      // update embed
+      await sent.edit({ embeds: [embed.setDescription(buildDesc())] });
+      await message.channel.send(`✅ ${positions[idx]} confirmed for <@${user.id}>`);
+      // check if all filled
+      if (claimed.every((c) => c)) {
+        const final = positions.map((p, i) => `${p}: <@${claimed[i]}>`).join("\n");
+        await message.channel.send("**FINAL LINEUP:**\n" + final);
+        collector.stop("filled");
+      }
+    } catch (e) {
+      console.error("hostfriendly collect:", e);
+    }
+  });
+
+  collector.on("remove", async (reaction, user) => {
+    try {
+      const idx = emojis.indexOf(reaction.emoji.name);
+      if (claimed[idx] === user.id) {
+        claimed[idx] = null;
+        delete userClaim[user.id];
+        await sent.edit({ embeds: [embed.setDescription(buildDesc())] });
+        safeLogToChannel(message.guild, "Hostfriendly Unclaim", `${user.tag} unclaimed ${positions[idx]}`, message.guild);
+      }
+    } catch (e) {
+      console.error("hostfriendly remove:", e);
+    }
+  });
+
+  collector.on("end", (collected, reason) => {
+    safeLogToChannel(message.guild, "Hostfriendly Ended", `Ended by ${reason}`, message.guild);
+  });
+
+  // Save session in memory in case you want to reference later
+  client.hostfriendlies.set(sent.id, { message: sent, positions, claimed });
+}
+
+// ---------- Activity Check ----------
+async function startActivityCheck(channel, author, goal = 40) {
+  const embed = new EmbedBuilder()
+    .setTitle("__**AGNELLO FC Activity Check**__")
+    .setDescription(`**React with:** ✅\n**Goal:** ${goal}\n**Duration:** 1 Day\n@everyone`)
+    .setColor(0x00ff00)
+    .setFooter({ text: `Started by ${author.tag}` })
+    .setTimestamp();
+
+  const sent = await channel.send({ content: "@everyone", embeds: [embed] });
+  await sent.react("✅");
+
+  const filter = (reaction, user) => reaction.emoji.name === "✅" && !user.bot;
+  const collector = sent.createReactionCollector({ filter, time: 24 * 60 * 60 * 1000 });
+
+  collector.on("collect", (r) => {
+    const count = r.count - 1; // subtract bot
+    if (count >= goal) {
+      channel.send(`🎉 Activity Check goal reached (${count}/${goal})`);
+      safeLogToChannel(channel.guild, "Activity Check", `Goal reached: ${count}/${goal}`, channel.guild);
+      collector.stop("goal reached");
+    }
+  });
+
+  collector.on("end", (_, reason) => {
+    if (reason !== "goal reached") safeLogToChannel(channel.guild, "Activity Check Ended", `Ended: ${reason}`, channel.guild);
+  });
+}
+
+// ---------- Auto-React to @everyone / @here ----------
+client.on("messageCreate", async (message) => {
+  if (!message.guild || message.author.bot) return;
+  try {
+    // message.mentions.has(message.guild.roles.everyone) is not directly supported; check content
+    if (message.mentions.everyone || message.content.includes("@here")) {
+      await message.react("✅").catch(() => {});
+    }
+  } catch (e) {
+    // ignore
+  }
 });
 
-// ==========================
-// Automatic VC Moderation
-// ==========================
-client.on("voiceStateUpdate", async (oldState,newState) => {
-    if(!newState.channelId) return; // left VC
-    const member = newState.member;
-
-    if(member.user.bot) return;
-
-    // Auto mute anyone joining VC
-    if(newState.channel) {
-        try { await member.voice.setMute(true, "Auto VC mute"); } catch(err) {}
-        logAction("Auto VC Mute", `${member.user.tag} was auto-muted in VC`, newState.guild);
-
-        // Record 10s clip
-        try {
-            const connection = joinVoiceChannel({
-                channelId: newState.channelId,
-                guildId: newState.guild.id,
-                adapterCreator: newState.guild.voiceAdapterCreator,
-                selfMute: true,
-                selfDeaf: true
-            });
-            const receiver = connection.receiver;
-            const audioStream = receiver.subscribe(member.id, { end: { behavior: "silence", duration: 10000 } });
-            const chunks = [];
-            audioStream.on("data", chunk => chunks.push(chunk));
-            audioStream.on("end", () => {
-                const buffer = Buffer.concat(chunks);
-                fs.writeFileSync(`./vc_logs/${member.id}_${Date.now()}.pcm`, buffer);
-                logAction("VC Clip Saved", `${member.user.tag}'s 10s clip recorded`, newState.guild);
-            });
-        } catch(err) { console.error(err); }
+// ---------- Simple text swear filter (deletes and warns) ----------
+client.on("messageCreate", async (message) => {
+  if (!message.guild || message.author.bot) return;
+  const lc = message.content.toLowerCase();
+  for (const w of swears) {
+    if (w && lc.includes(w)) {
+      try {
+        await message.delete().catch(() => {});
+      } catch {}
+      message.channel.send(`${message.author}, watch your language.`).catch(() => {});
+      safeLogToChannel(message.guild, "Swear (text)", `${message.author.tag} said: ${w}`, message.guild);
+      break;
     }
+  }
 });
 
-// ==========================
-// Auto ✅ for @everyone / @here
-// ==========================
-client.on("messageCreate", async message => {
-    if(message.mentions.has(message.guild.roles.everyone) || message.content.includes("@here")) {
-        message.react("✅");
+// ---------- Safe Voice Join Wrapper ----------
+async function safeJoinVoiceChannel(options) {
+  if (!ENABLE_VOICE) throw new Error("Voice disabled");
+  try {
+    const conn = joinVoiceChannel(options);
+    conn.on("error", (err) => console.error("Voice connection error:", err));
+    // Wait ready if possible
+    try {
+      await entersState(conn, VoiceConnectionStatus.Ready, 15000);
+    } catch (e) {
+      // Could not enter ready state; return connection anyway
+      console.error("Voice connection not ready:", e);
     }
+    return conn;
+  } catch (e) {
+    console.error("safeJoinVoiceChannel failed:", e);
+    throw e;
+  }
+}
+
+// ---------- Graceful failure handlers ----------
+process.on("unhandledRejection", (reason, p) => {
+  console.error("Unhandled Rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
 });
 
-// ==========================
-// Bot Ready
-// ==========================
+// ---------- Ready ----------
 client.once("ready", () => {
-    console.log(`✅ Logged in as ${client.user.tag}`);
-    console.log("Voice + Music + VC Auto-Moderation Ready!");
+  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`ENABLE_VOICE = ${ENABLE_VOICE}`);
+  if (!ENABLE_VOICE) console.log("Voice disabled — to enable set ENABLE_VOICE=true on a UDP-enabled host");
+  console.log("Bot ready.");
 });
 
-// ==========================
-// Login
-// ==========================
+// ---------- Login ----------
+if (!TOKEN) {
+  console.error("ERROR: No bot token set in environment variable TOKEN");
+  process.exit(1);
+}
 client.login(TOKEN);
