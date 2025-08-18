@@ -65,58 +65,159 @@ client.on("messageCreate", async message => {
   }
 });
 
-// ----------------------------
-// Hostfriendly Reaction Roles
-// ----------------------------
-client.on("messageCreate", async message => {
-  if (!message.content.startsWith(`${PREFIX}hostfriendly`)) return;
-  if (!message.member.roles.cache.has(HOST_ROLE_ID)) {
-    return message.reply("❌ You are not allowed to host friendlies.");
-  }
+// ===============================
+// !hostfriendly command
+// ===============================
+if (command === "hostfriendly") {
+    const HOST_ROLE_ID = "1383970211933454378";
 
-  const embed = new EmbedBuilder()
-    .setTitle("⚽ 7v7 Friendly Lineup")
-    .setDescription("React with 1️⃣–7️⃣ to claim your spot!\nThe host can pre-claim a position.")
-    .setColor("Green");
-
-  const msg = await message.channel.send({ embeds: [embed] });
-  for (const emoji of ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣"]) {
-    await msg.react(emoji);
-  }
-
-  const filter = (reaction, user) => !user.bot;
-  const collector = msg.createReactionCollector({ filter });
-
-  const lineup = new Map();
-
-  collector.on("collect", async (reaction, user) => {
-    const member = await message.guild.members.fetch(user.id);
-    if (lineup.has(user.id)) {
-      return user.send("❌ You are already in the lineup!");
+    // Role check
+    if (!message.member.roles.cache.has(HOST_ROLE_ID)) {
+        return message.reply("❌ You are not allowed to host friendlies.");
     }
-    if (Array.from(lineup.values()).includes(reaction.emoji.name)) {
-      return user.send("❌ That position is already taken!");
-    }
-    lineup.set(user.id, reaction.emoji.name);
-    await user.send(`✅ You have been assigned position ${reaction.emoji.name}`);
-    message.channel.send(`📌 ${user.tag} confirmed for position ${reaction.emoji.name}`);
-  });
-});
 
-// ----------------------------
-// Activity Check
-// ----------------------------
-client.on("messageCreate", async message => {
-  if (!message.content.startsWith(`${PREFIX}activitycheck`)) return;
-  const args = message.content.split(" ");
-  const goal = parseInt(args[1]) || 40;
-  const embed = new EmbedBuilder()
-    .setTitle("📊 Activity Check")
-    .setDescription(`React with ✅ to check in!\nGoal: **${goal}** members.`)
-    .setColor("Blue");
-  const msg = await message.channel.send({ embeds: [embed] });
-  await msg.react("✅");
-});
+    const positions = ["GK", "CB", "CB2", "CM", "LW", "RW", "ST"];
+    const numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣"];
+
+    let lineup = {}; // { userId: posIndex }
+    let taken = new Array(positions.length).fill(null);
+
+    // Preclaim logic (host reserves a slot if passed)
+    let preclaimIndex = null;
+    if (args[0]) {
+        const arg = args[0].toLowerCase();
+        let chosen = -1;
+
+        // Check if number
+        if (!isNaN(arg)) {
+            chosen = parseInt(arg) - 1;
+        } else {
+            chosen = positions.findIndex(p => p.toLowerCase() === arg);
+        }
+
+        if (chosen >= 0 && chosen < positions.length && !taken[chosen]) {
+            lineup[message.author.id] = chosen;
+            taken[chosen] = message.author.id;
+            preclaimIndex = chosen;
+        }
+    }
+
+    // Embed builder
+    const buildEmbed = () => {
+        let desc = positions.map((pos, i) => {
+            const userId = taken[i];
+            return `${numbers[i]} ➝ **${pos}**\n${userId ? `<@${userId}>` : "_-_"}`;
+        }).join("\n\n");
+
+        let finalLineup = positions.map((pos, i) => {
+            const userId = taken[i];
+            return `${pos}: ${userId ? `<@${userId}>` : "_-_"}`;
+        }).join("\n");
+
+        return new EmbedBuilder()
+            .setTitle("AGNELLO FC 7v7 FRIENDLY")
+            .setColor("Green")
+            .setDescription(desc + "\n\nReact to claim a position. Only 1 position per user. Please do not glitch out the bot, by attempting to react to all positions. There will be a punishment.\n\n" +
+                "✅ **Final Lineup:**\n" + finalLineup);
+    };
+
+    const embedMsg = await message.channel.send({ embeds: [buildEmbed()] });
+
+    for (const emoji of numbers) {
+        await embedMsg.react(emoji);
+    }
+
+    // Reaction collector
+    const collector = embedMsg.createReactionCollector({
+        filter: (reaction, user) => numbers.includes(reaction.emoji.name) && !user.bot,
+        dispose: true
+    });
+
+    collector.on("collect", async (reaction, user) => {
+        const posIndex = numbers.indexOf(reaction.emoji.name);
+
+        if (lineup[user.id] !== undefined) {
+            await reaction.users.remove(user.id);
+            return message.channel.send(`<@${user.id}> ❌ You are already in the lineup!`);
+        }
+
+        if (taken[posIndex]) {
+            await reaction.users.remove(user.id);
+            return message.channel.send(`<@${user.id}> ❌ That position is already filled.`);
+        }
+
+        lineup[user.id] = posIndex;
+        taken[posIndex] = user.id;
+
+        try {
+            await user.send(`✅ You have been confirmed for **${positions[posIndex]}** in the lineup!`);
+        } catch {
+            message.channel.send(`⚠️ Could not DM <@${user.id}>.`);
+        }
+
+        await embedMsg.edit({ embeds: [buildEmbed()] });
+        await message.channel.send(`✅ ${positions[posIndex]} confirmed for <@${user.id}>`);
+    });
+
+    // Save embed & lineup to memory for !editlineup
+    client.lineupData = { embedMsg, lineup, taken, positions, numbers };
+}
+
+// ===============================
+// !editlineup command (host only)
+// ===============================
+if (command === "editlineup") {
+    const HOST_ROLE_ID = "1383970211933454378";
+    if (!message.member.roles.cache.has(HOST_ROLE_ID)) {
+        return message.reply("❌ Only the friendly host can edit the lineup.");
+    }
+
+    if (!client.lineupData) {
+        return message.reply("❌ No active lineup found.");
+    }
+
+    const { embedMsg, lineup, taken, positions, numbers } = client.lineupData;
+
+    const posArg = args[0]?.toLowerCase();
+    const user = message.mentions.users.first();
+    if (!posArg || !user) {
+        return message.reply("⚠️ Usage: `!editlineup <pos> <@user>` (e.g. `!editlineup cm @Player`)");
+    }
+
+    let posIndex = -1;
+    if (!isNaN(posArg)) {
+        posIndex = parseInt(posArg) - 1;
+    } else {
+        posIndex = positions.findIndex(p => p.toLowerCase() === posArg);
+    }
+
+    if (posIndex < 0 || posIndex >= positions.length) {
+        return message.reply("❌ Invalid position.");
+    }
+
+    // Free position if taken
+    if (taken[posIndex]) {
+        const prevUserId = taken[posIndex];
+        delete lineup[prevUserId];
+    }
+
+    // Assign new player
+    lineup[user.id] = posIndex;
+    taken[posIndex] = user.id;
+
+    await embedMsg.edit({ embeds: [new EmbedBuilder()
+        .setTitle("AGNELLO FC 7v7 FRIENDLY")
+        .setColor("Green")
+        .setDescription(positions.map((pos, i) =>
+            `${numbers[i]} ➝ **${pos}**\n${taken[i] ? `<@${taken[i]}>` : "_-_"}`
+        ).join("\n\n") + "\n\n✅ **Final Lineup:**\n" +
+            positions.map((pos, i) =>
+                `${pos}: ${taken[i] ? `<@${taken[i]}>` : "_-_"}`
+            ).join("\n"))] });
+
+    await message.channel.send(`✏️ ${positions[posIndex]} updated → <@${user.id}>`);
+}
+
 
 // ----------------------------
 // Moderation Commands
