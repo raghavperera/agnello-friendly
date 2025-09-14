@@ -107,7 +107,24 @@ client.on('guildMemberRemove', async (member) => {
     await member.send(`😢 Sorry to see you leave **${member.guild.name}**. You're welcome back anytime.`);
   } catch {}
 });
+// --- !help Command ---
+if (message.content.toLowerCase().startsWith("!help")) {
+    const helpEmbed = new EmbedBuilder()
+        .setColor("#00AAFF")
+        .setTitle("📖 Agnello FC Friendly Bot — Help Menu")
+        .setDescription("Here are all the available commands and features:")
+        .addFields(
+            { name: "⚽ Friendlies", value: "`!hostfriendly` — Post reaction-role lineup (GK, CB, CB2, CM, LW, RW, ST)" },
+            { name: "🛠 Moderation", value: "`!ban @user`\n`!unban <userId>`\n`!kick @user`\n`!timeout @user <seconds>`\n`!vmute @user` (voice mute)" },
+            { name: "🎵 Music", value: "`!joinvc`\n`!leavevc`\n`!play <YouTubeURL>`\n`!skip`\n`!stop`" },
+            { name: "👥 Activity", value: "`!activitycheck <goal>` — Start activity check with ✅ reactions" },
+            { name: "✉️ DM Tools", value: "`!dmrole <roleId> <message>`\n`!dmall <message>` (Admins only)" },
+            { name: "📢 Auto Features", value: "✅ Reacts to @everyone/@here\n🧹 Auto deletes swears in chat\n🎤 Auto VC mute (if on UDP-enabled host)\n👋 Welcome + Farewell messages with DMs" },
+        )
+        .setFooter({ text: "Agnello FC Bot — Built for 7v7 Friendlies ⚽" });
 
+    message.channel.send({ embeds: [helpEmbed] });
+}
 // -----------------------------
 // AUTO ✅ on @everyone/@here
 // -----------------------------
@@ -119,7 +136,407 @@ client.on('messageCreate', async (message) => {
     }
   } catch {}
 });
+// ---------------------------
+// Economy & Gambling Module
+// ---------------------------
+// Requires: fs imported at top of file
+// Persist file: './economy.json'
+// Add these commands to your message handler (prefix-based)
 
+import fs from 'fs';
+import path from 'path';
+
+const ECON_FILE = path.join(process.cwd(), 'economy.json');
+
+// load or init file
+function loadEconomy() {
+  try {
+    if (!fs.existsSync(ECON_FILE)) {
+      fs.writeFileSync(ECON_FILE, JSON.stringify({}), 'utf8');
+    }
+    const raw = fs.readFileSync(ECON_FILE, 'utf8');
+    return JSON.parse(raw || '{}');
+  } catch (e) {
+    console.error('Failed to load economy file:', e);
+    return {};
+  }
+}
+function saveEconomy(data) {
+  try {
+    fs.writeFileSync(ECON_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save economy file:', e);
+  }
+}
+
+let ECON = loadEconomy();
+
+// ensure user exists
+function ensureUser(id) {
+  if (!ECON[id]) ECON[id] = { balance: 10 }; // start with 10 robux by default
+  return ECON[id];
+}
+
+function getBal(id) {
+  const u = ensureUser(id);
+  return u.balance || 0;
+}
+function setBal(id, amount) {
+  ensureUser(id);
+  ECON[id].balance = Math.max(0, Math.floor(amount));
+  saveEconomy(ECON);
+}
+function addBal(id, amount) {
+  ensureUser(id);
+  ECON[id].balance = Math.max(0, Math.floor((ECON[id].balance || 0) + amount));
+  saveEconomy(ECON);
+  return ECON[id].balance;
+}
+function subBal(id, amount) {
+  ensureUser(id);
+  ECON[id].balance = Math.max(0, Math.floor((ECON[id].balance || 0) - amount));
+  saveEconomy(ECON);
+  return ECON[id].balance;
+}
+
+// helpers
+function parseBet(arg, max) {
+  if (!arg) return null;
+  arg = arg.toLowerCase();
+  if (arg === 'all') return max;
+  if (arg.endsWith('%')) {
+    const p = parseFloat(arg.slice(0, -1));
+    if (isNaN(p) || p <= 0) return null;
+    return Math.max(1, Math.floor((p / 100) * max));
+  }
+  const n = parseInt(arg, 10);
+  if (isNaN(n) || n <= 0) return null;
+  return n;
+}
+
+function randInt(min, max) { // inclusive
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// ---------------------------
+// Games
+// ---------------------------
+
+// SPIN (wheel): multipliers array
+function spinWheel(bet) {
+  // multipliers: common small, rare big
+  const wheel = [
+    0, 0, 0, 0, 0, // blanks -> lose
+    1, 1, // return
+    2, 2,
+    3,
+    5,
+    10,
+    20,
+    50, // very rare
+  ];
+  const choice = wheel[randInt(0, wheel.length - 1)];
+  return Math.floor(choice * bet);
+}
+
+// COIN flip: double or lose
+function coinFlip(bet) {
+  const win = Math.random() < 0.5;
+  return win ? bet : -bet;
+}
+
+// SLOTS: 3 symbols: 🍒, 🍋, 🔔, ⭐, 💎
+function slotsResult(bet) {
+  const symbols = ['🍒','🍋','🔔','⭐','💎'];
+  const r1 = symbols[randInt(0, symbols.length - 1)];
+  const r2 = symbols[randInt(0, symbols.length - 1)];
+  const r3 = symbols[randInt(0, symbols.length - 1)];
+  const display = `${r1} ${r2} ${r3}`;
+  let payout = 0;
+  if (r1 === r2 && r2 === r3) {
+    // triple
+    if (r1 === '💎') payout = bet * 10;
+    else if (r1 === '⭐') payout = bet * 6;
+    else if (r1 === '🔔') payout = bet * 4;
+    else payout = bet * 3;
+  } else if (r1 === r2 || r2 === r3 || r1 === r3) {
+    // pair
+    payout = Math.floor(bet * 1.5);
+  } else {
+    payout = -bet;
+  }
+  return { display, payout };
+}
+
+// BLACKJACK: simplified auto-play for player (player hits until >=17), dealer hits until 17
+function drawCard() {
+  // returns value and pretty name
+  const ranks = [
+    ['A', 11],
+    ['2',2],['3',3],['4',4],['5',5],['6',6],['7',7],
+    ['8',8],['9',9],['10',10],['J',10],['Q',10],['K',10]
+  ];
+  const r = ranks[randInt(0, ranks.length - 1)];
+  return { rank: r[0], value: r[1] };
+}
+function handValue(cards) {
+  // cards: [{rank,value},...]
+  let total = cards.reduce((s,c) => s + c.value, 0);
+  // count Aces
+  const aces = cards.filter(c => c.rank === 'A').length;
+  let adjusted = total;
+  // treat some aces as 1 if bust
+  for (let i=0;i<aces;i++) {
+    if (adjusted > 21) adjusted -= 10; // convert an Ace from 11 to 1
+  }
+  return adjusted;
+}
+function blackjackResolve(bet) {
+  // player auto hits until >=17
+  const player = [drawCard(), drawCard()];
+  const dealer = [drawCard(), drawCard()];
+  while (handValue(player) < 17) player.push(drawCard());
+  while (handValue(dealer) < 17) dealer.push(drawCard());
+
+  const pv = handValue(player), dv = handValue(dealer);
+  let result = null;
+  let payout = 0;
+  if (pv > 21) { result = 'bust'; payout = -bet; }
+  else if (dv > 21) { result = 'dealer_bust'; payout = bet; }
+  else if (pv > dv) { result = 'win'; payout = bet; }
+  else if (pv < dv) { result = 'lose'; payout = -bet; }
+  else { result = 'push'; payout = 0; }
+
+  return {
+    player, dealer, pv, dv, result, payout
+  };
+}
+
+// POKER (simple 5-card compare): evaluate basic ranking
+function buildDeck() {
+  const suits = ['♠','♥','♦','♣'];
+  const ranks = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+  const deck = [];
+  for (const s of suits) for (const r of ranks) deck.push({ s, r });
+  return deck;
+}
+function shuffle(deck) {
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = randInt(0, i);
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+}
+function rankValue(r) {
+  const order = {'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'J':11,'Q':12,'K':13,'A':14};
+  return order[r];
+}
+function isStraight(vals) {
+  vals.sort((a,b)=>a-b);
+  // accommodate wheel A-2-3-4-5
+  let isSeq = true;
+  for (let i=1;i<vals.length;i++) if (vals[i] !== vals[i-1]+1) { isSeq = false; break; }
+  if (isSeq) return true;
+  // check A low
+  if (vals.includes(14)) {
+    const alt = vals.map(v => v===14?1:v).sort((a,b)=>a-b);
+    let ok = true;
+    for (let i=1;i<alt.length;i++) if (alt[i] !== alt[i-1]+1) { ok=false; break; }
+    return ok;
+  }
+  return false;
+}
+function evaluateHand(cards) {
+  // cards: [{s,r}]
+  const vals = cards.map(c => rankValue(c.r));
+  const suits = cards.map(c => c.s);
+  const counts = {};
+  for (const v of vals) counts[v] = (counts[v]||0)+1;
+  const countsSorted = Object.values(counts).sort((a,b)=>b-a); // e.g. [3,1,1]
+  const unique = Object.keys(counts).length;
+  const flush = suits.every(s => s === suits[0]);
+  const straight = isStraight(vals.slice());
+  if (straight && flush) return { rank:8, name:'Straight Flush', t: Math.max(...vals) };
+  if (countsSorted[0] === 4) return { rank:7, name:'Four of a Kind', t: parseInt(Object.keys(counts).find(k=>counts[k]===4)) };
+  if (countsSorted[0] === 3 && countsSorted[1] === 2) return { rank:6, name:'Full House', t: parseInt(Object.keys(counts).find(k=>counts[k]===3)) };
+  if (flush) return { rank:5, name:'Flush', t: Math.max(...vals) };
+  if (straight) return { rank:4, name:'Straight', t: Math.max(...vals) };
+  if (countsSorted[0] === 3) return { rank:3, name:'Three of a Kind', t: parseInt(Object.keys(counts).find(k=>counts[k]===3)) };
+  if (countsSorted[0] === 2 && countsSorted[1] === 2) {
+    // two pair
+    const pairs = Object.keys(counts).filter(k=>counts[k]===2).map(x=>parseInt(x)).sort((a,b)=>b-a);
+    return { rank:2, name:'Two Pair', t: pairs[0]*100 + pairs[1] }; // t holds combined
+  }
+  if (countsSorted[0] === 2) return { rank:1, name:'One Pair', t: parseInt(Object.keys(counts).find(k=>counts[k]===2)) };
+  return { rank:0, name:'High Card', t: Math.max(...vals) };
+}
+function compareHands(a,b) {
+  if (a.rank !== b.rank) return a.rank - b.rank;
+  return a.t - b.t;
+}
+function pokerResolve(bet) {
+  const deck = shuffle(buildDeck());
+  const player = deck.splice(0,5);
+  const dealer = deck.splice(0,5);
+  const er = evaluateHand(player);
+  const dr = evaluateHand(dealer);
+  const cmp = compareHands(er, dr);
+  let payout = 0;
+  if (cmp > 0) payout = bet; // player > dealer => win
+  else if (cmp < 0) payout = -bet;
+  else payout = 0; // tie
+  return { player, dealer, er, dr, payout };
+}
+
+// CRIME: risk/reward, e.g., 50% success, 50% caught
+function crimeAttempt() {
+  const roll = Math.random();
+  if (roll < 0.45) { // success
+    const amount = randInt(5, 50); // reward
+    return { success: true, amount };
+  } else { // caught
+    const fine = randInt(10, 60);
+    return { success: false, fine };
+  }
+}
+
+// ---------------------------
+// Commands (add to your message handler)
+// Prefix assumed to be in variable `PREFIX` and message available
+// Example usage:
+// !start
+// !bal
+// !give @user 10
+// !spin 5
+// !coin 5
+// !slots 10
+// !blackjack 5
+// !poker 10
+// !crime
+// ---------------------------
+
+/* Example: in your messageCreate handler add the following */
+
+if (message.content.startsWith(PREFIX)) {
+  const [cmdRaw, ...cmdArgs] = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const cmd = cmdRaw.toLowerCase();
+
+  // ensure author initialized
+  ensureUser(message.author.id);
+
+  // START: init user with 10 robux (or show bal)
+  if (cmd === 'start') {
+    const bal = getBal(message.author.id);
+    return message.reply(`You have ${bal} Robux. (New users start with 10 Robux)`);
+  }
+
+  // BALANCE
+  if (cmd === 'bal' || cmd === 'balance') {
+    const bal = getBal(message.author.id);
+    return message.reply(`${message.author}, your balance: **${bal} Robux**`);
+  }
+
+  // GIVE
+  if (cmd === 'give') {
+    const target = message.mentions.users.first();
+    const amtArg = cmdArgs[1] || cmdArgs[0];
+    if (!target) return message.reply('Usage: `!give @user <amount>`');
+    const amt = parseInt(amtArg,10);
+    if (isNaN(amt) || amt <= 0) return message.reply('Invalid amount.');
+    if (getBal(message.author.id) < amt) return message.reply('Insufficient funds.');
+    subBal(message.author.id, amt);
+    addBal(target.id, amt);
+    return message.reply(`✅ Sent ${amt} Robux to ${target.tag}. Your new balance: ${getBal(message.author.id)} Robux`);
+  }
+
+  // SPIN
+  if (cmd === 'spin') {
+    const betArg = cmdArgs[0];
+    const bet = parseBet(betArg, getBal(message.author.id));
+    if (!bet) return message.reply('Usage: `!spin <amount|all|<percent>%>`');
+    if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.');
+    subBal(message.author.id, bet);
+    const win = spinWheel(bet);
+    if (win > 0) {
+      addBal(message.author.id, win);
+      return message.reply(`🎡 You spun and won **${win} Robux**! New balance: ${getBal(message.author.id)}`);
+    } else {
+      return message.reply(`🎡 Bad luck — you lost ${bet} Robux. New balance: ${getBal(message.author.id)}`);
+    }
+  }
+
+  // COIN
+  if (cmd === 'coin') {
+    const betArg = cmdArgs[0];
+    const bet = parseBet(betArg, getBal(message.author.id));
+    if (!bet) return message.reply('Usage: `!coin <amount|all|<percent>%>`');
+    if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.');
+    const res = coinFlip(bet);
+    if (res > 0) { addBal(message.author.id, res); subBal(message.author.id, 0); return message.reply(`🪙 You won ${res} Robux! New balance: ${getBal(message.author.id)}`); }
+    else { subBal(message.author.id, -res); return message.reply(`🪙 You lost ${bet} Robux. New balance: ${getBal(message.author.id)}`); }
+  }
+
+  // SLOTS
+  if (cmd === 'slots') {
+    const betArg = cmdArgs[0];
+    const bet = parseBet(betArg, getBal(message.author.id));
+    if (!bet) return message.reply('Usage: `!slots <amount|all|<percent>%>`');
+    if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.');
+    subBal(message.author.id, bet);
+    const { display, payout } = slotsResult(bet);
+    if (payout > 0) addBal(message.author.id, payout);
+    return message.reply(`🎰 ${display}\n${payout>0?`You won ${payout} Robux!`:`You lost ${bet} Robux.`}\nNew balance: ${getBal(message.author.id)}`);
+  }
+
+  // BLACKJACK (auto-play)
+  if (cmd === 'blackjack' || cmd === 'bj') {
+    const betArg = cmdArgs[0];
+    const bet = parseBet(betArg, getBal(message.author.id));
+    if (!bet) return message.reply('Usage: `!blackjack <amount|all|<percent>%>`');
+    if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.');
+    subBal(message.author.id, bet);
+    const res = blackjackResolve(bet);
+    // pretty print hands
+    const playerHand = res.player.map(c=>c.rank).join(' ');
+    const dealerHand = res.dealer.map(c=>c.rank).join(' ');
+    if (res.payout > 0) addBal(message.author.id, res.payout);
+    const resultText = res.result === 'push' ? 'Push — bet returned.' : (res.payout>0?`You win ${res.payout} Robux!`:`You lose ${-res.payout} Robux.`);
+    return message.reply(`🃏 Blackjack\nYour hand: ${playerHand} (${res.pv})\nDealer hand: ${dealerHand} (${res.dv})\n${resultText}\nNew balance: ${getBal(message.author.id)}`);
+  }
+
+  // POKER (5-card showdown)
+  if (cmd === 'poker') {
+    const betArg = cmdArgs[0];
+    const bet = parseBet(betArg, getBal(message.author.id));
+    if (!bet) return message.reply('Usage: `!poker <amount|all|<percent>%>`');
+    if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.');
+    subBal(message.author.id, bet);
+    const res = pokerResolve(bet);
+    if (res.payout > 0) addBal(message.author.id, res.payout);
+    // display short
+    const ph = res.player.map(c=>`${c.r}${c.s}`).join(' ');
+    const dh = res.dealer.map(c=>`${c.r}${c.s}`).join(' ');
+    const outcome = res.payout>0?`You won ${res.payout} Robux!`:(res.payout<0?`You lost ${-res.payout} Robux.`:'Push.');
+    return message.reply(`🂡 Poker (5-card)\nYour hand: ${ph} — ${res.er.name}\nDealer hand: ${dh} — ${res.dr.name}\n${outcome}\nNew balance: ${getBal(message.author.id)}`);
+  }
+
+  // CRIME
+  if (cmd === 'crime') {
+    // no bet, risk-based
+    const res = crimeAttempt();
+    if (res.success) {
+      addBal(message.author.id, res.amount);
+      getLog(message.guild)?.send(`🕵️‍♂️ Crime success: ${message.author.tag} got ${res.amount} Robux`);
+      return message.reply(`💰 Crime succeeded! You stole **${res.amount} Robux**. New balance: ${getBal(message.author.id)}`);
+    } else {
+      // fine: subtract but not below zero
+      const loss = Math.min(getBal(message.author.id), res.fine);
+      subBal(message.author.id, loss);
+      getLog(message.guild)?.send(`🚔 Crime failed: ${message.author.tag} fined ${loss} Robux`);
+      return message.reply(`🚨 You got caught! You paid **${loss} Robux** in fines. New balance: ${getBal(message.author.id)}`);
+    }
+  }
+}
 // -----------------------------
 // TEXT PROFANITY FILTER (+warn, DM, log)
 // -----------------------------
