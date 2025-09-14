@@ -22,6 +22,8 @@ import {
 } from '@discordjs/voice';
 import ytdl from 'ytdl-core';
 import ffmpeg from 'ffmpeg-static';
+import fs from 'fs';
+import path from 'path';
 
 // -----------------------------
 // ENV / CONFIG
