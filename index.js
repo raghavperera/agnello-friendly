@@ -589,7 +589,19 @@ async function playTrack(guildId, url, textChannel) {
   const info = await ytdl.getInfo(url).catch(() => null);
   await textChannel.send(`🎶 Playing **${info?.videoDetails?.title || url}**`);
 }
+// --- Keepalive server for Render ---
+import express from "express";
 
+const app = express();
+const PORT = process.env.PORT || 10000;
+
+app.get("/", (req, res) => {
+  res.send("✅ Agnello FC Bot is alive and running!");
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌍 Keepalive server listening on http://0.0.0.0:${PORT}`);
+});
 // -----------------------------
 // LOGIN
 // -----------------------------
