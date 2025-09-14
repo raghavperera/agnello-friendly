@@ -100,7 +100,65 @@ function parseBet(arg, max) {
   if (Number.isNaN(n) || n <= 0) return null;
   return n;
 }
+// --- Purge Command ---
+client.on('messageCreate', async message => {
+  if (!message.content.startsWith(PREFIX) || message.author.bot) return;
 
+  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+  const cmd = args.shift().toLowerCase();
+
+  if (cmd === 'purge') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+      return message.reply('❌ You don’t have permission to purge messages.');
+    }
+
+    const amount = parseInt(args[0], 10);
+    if (isNaN(amount) || amount < 1 || amount > 100) {
+      return message.reply('⚠️ Please enter a number between 1 and 100.');
+    }
+
+    await message.channel.bulkDelete(amount, true)
+      .then(deleted => {
+        message.channel.send(`✅ Deleted **${deleted.size}** messages.`)
+          .then(msg => setTimeout(() => msg.delete(), 5000));
+      })
+      .catch(err => {
+        console.error(err);
+        message.reply('❌ I can’t delete messages older than 14 days.');
+      });
+  }
+});
+// --- AI-Powered Responses (when bot is mentioned) ---
+import OpenAI from "openai";
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY, // put this in your .env file
+});
+
+client.on("messageCreate", async message => {
+  if (message.author.bot) return;
+
+  // Only reply when the bot is mentioned
+  if (message.mentions.has(client.user)) {
+    try {
+      await message.channel.sendTyping(); // typing indicator
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You are Agnello FC Friendly Bot, a helpful, funny, and friendly Discord bot for managing friendlies, moderation, and chatting casually." },
+          { role: "user", content: message.content.replace(`<@${client.user.id}>`, "").trim() }
+        ],
+      });
+
+      const reply = completion.choices[0].message?.content || "🤖 I don’t know what to say!";
+      message.reply(reply);
+
+    } catch (err) {
+      console.error("OpenAI error:", err);
+      message.reply("⚠️ Sorry, I had trouble coming up with a reply.");
+    }
+  }
+});
 // -----------------------------
 // Games: spin, coin, slots, blackjack, poker, crime
 // -----------------------------
