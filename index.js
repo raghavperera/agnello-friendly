@@ -41,7 +41,40 @@ const FAREWELL_CHANNEL_ID = '1403930222222643220';
 
 // Prefix
 const PREFIX = '!';
+// -----------------------------
+// Economy System
+// -----------------------------
+const economyFile = path.resolve('./economy.json');
+let economy = {};
 
+// Load economy data
+if (fs.existsSync(economyFile)) {
+  try {
+    economy = JSON.parse(fs.readFileSync(economyFile, 'utf8'));
+  } catch (err) {
+    console.error("Failed to parse economy.json:", err);
+    economy = {};
+  }
+}
+
+// Save economy data
+function saveEconomy() {
+  fs.writeFileSync(economyFile, JSON.stringify(economy, null, 2));
+}
+
+function getBal(userId) {
+  if (!economy[userId]) {
+    economy[userId] = { balance: 10 }; // everyone starts with 10 Robux
+    saveEconomy();
+  }
+  return economy[userId].balance;
+}
+
+function addBal(userId, amt) {
+  getBal(userId);
+  economy[userId].balance += amt;
+  saveEconomy();
+}
 // Basic swear list (you can swap to an external file if you want)
 const SWEARS = [
   'fuck','shit','bitch','asshole','cunt','bastard','dick','pussy','slut','whore',
