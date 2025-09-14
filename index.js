@@ -75,6 +75,61 @@ function addBal(userId, amt) {
   economy[userId].balance += amt;
   saveEconomy();
 }
+client.on("messageCreate", async message => {
+  if (message.author.bot || !message.guild) return;
+  if (!message.content.startsWith(PREFIX)) return;
+
+  const [cmdRaw, ...args] = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const cmd = cmdRaw.toLowerCase();
+
+  // Balance
+  if (cmd === "bal") {
+    const bal = getBal(message.author.id);
+    return message.reply(`💰 You have **${bal} Robux**.`);
+  }
+
+  // Give robux
+  if (cmd === "give") {
+    const target = message.mentions.users.first();
+    const amt = parseInt(args[1]);
+    if (!target || isNaN(amt) || amt <= 0) return message.reply("Usage: `!give @user <amount>`");
+
+    if (getBal(message.author.id) < amt) return message.reply("❌ Not enough Robux!");
+    addBal(message.author.id, -amt);
+    addBal(target.id, amt);
+    return message.reply(`✅ Gave **${amt} Robux** to ${target.username}`);
+  }
+
+  // Gamble simple coinflip
+  if (cmd === "gamble") {
+    const amt = parseInt(args[0]);
+    if (isNaN(amt) || amt <= 0) return message.reply("Usage: `!gamble <amount>`");
+    if (getBal(message.author.id) < amt) return message.reply("❌ Not enough Robux!");
+
+    const win = Math.random() < 0.5;
+    if (win) {
+      addBal(message.author.id, amt);
+      return message.reply(`🎉 You won **${amt} Robux**!`);
+    } else {
+      addBal(message.author.id, -amt);
+      return message.reply(`💸 You lost **${amt} Robux**!`);
+    }
+  }
+
+  // Crime (risk fine/jail)
+  if (cmd === "crime") {
+    const chance = Math.random();
+    if (chance < 0.4) {
+      const fine = Math.floor(Math.random() * 10) + 5;
+      addBal(message.author.id, -fine);
+      return message.reply(`🚓 You got caught committing a crime and paid a fine of **${fine} Robux**.`);
+    } else {
+      const loot = Math.floor(Math.random() * 15) + 5;
+      addBal(message.author.id, loot);
+      return message.reply(`🕵️ You committed a crime successfully and stole **${loot} Robux**!`);
+    }
+  }
+});
 // Basic swear list (you can swap to an external file if you want)
 const SWEARS = [
   'fuck','shit','bitch','asshole','cunt','bastard','dick','pussy','slut','whore',
