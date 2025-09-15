@@ -300,7 +300,7 @@ client.on('messageCreate', async (message) => {
         const completion = await openai.chat.completions.create({
           model: "gpt-4o-mini",
           messages: [
-            { role: "system", content: "You are Agnello FC Friendly Bot, a helpful, funny, and friendly Discord bot for managing friendlies, moderation, and chatting casually." },
+            { role: "system", content: "You are Agnello FC Friendly Bot, a helpful, funny, and friendly Discord bot for managing friendlies, moderation, and chatting casually. You should know all about the Real Futbol league, and all of it's players, teams, and big leagues, RFL is a roblox soccer game that is super fun to play. If someone asks for a friendly from you, host a friendly in channel id 1361111188506935428 and run the command !hostfriendly." },
             { role: "user", content: userPrompt || "Hi!" },
           ],
         });
