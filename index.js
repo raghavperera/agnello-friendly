@@ -1,5 +1,5 @@
 // index.js
-// Agnello FC Friendly Bot — Consolidated & Fixed
+// Agnello FC Friendly Bot — Consolidated & Fixed (purge + AI mention responses merged)
 // Node 18+ / ESM / discord.js v14
 // -------------------------------------------------
 
@@ -7,6 +7,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import express from 'express';
+import OpenAI from 'openai';
 import {
   Client,
   GatewayIntentBits,
@@ -30,6 +31,7 @@ import ffmpegPath from 'ffmpeg-static';
 // ENV / CONFIG (edit IDs as needed)
 // -----------------------------
 const TOKEN = process.env.TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
 const ENABLE_VOICE = process.env.ENABLE_VOICE === 'true'; // set true only on UDP-capable VPS
 const LOG_CHANNEL_ID = '1362214241091981452'; // logging channel (server-specific)
 const HOST_ROLE_ID = '1383970211933454378'; // hostfriendly role
@@ -40,8 +42,8 @@ const PREFIX = '!';
 const ECON_FILE = path.join(process.cwd(), 'economy.json'); // economy persistence
 
 // -----------------------------
-// Basic Profanity list (non-exhaustive, non-slur)
-// You may expand; avoid including hateful slurs per community rules.
+// Basic Profanity list (non-exhaustive)
+// Avoid adding hateful slurs per community rules.
 // -----------------------------
 const SWEARS = [
   'fuck', 'shit', 'bitch', 'asshole', 'bastard', 'damn', 'crap', 'freak',
@@ -58,6 +60,16 @@ function getLogChannel(guild) {
   if (!guild) return null;
   const ch = guild.channels.cache.get(LOG_CHANNEL_ID);
   return ch || null;
+}
+
+// -----------------------------
+// OpenAI client (optional; only used if OPENAI_API_KEY present)
+// -----------------------------
+let openai = null;
+if (OPENAI_API_KEY) {
+  openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+} else {
+  console.warn('⚠️ OPENAI_API_KEY not set — AI mention responses will be disabled.');
 }
 
 // -----------------------------
@@ -100,65 +112,7 @@ function parseBet(arg, max) {
   if (Number.isNaN(n) || n <= 0) return null;
   return n;
 }
-// --- Purge Command ---
-client.on('messageCreate', async message => {
-  if (!message.content.startsWith(PREFIX) || message.author.bot) return;
 
-  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-  const cmd = args.shift().toLowerCase();
-
-  if (cmd === 'purge') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-      return message.reply('❌ You don’t have permission to purge messages.');
-    }
-
-    const amount = parseInt(args[0], 10);
-    if (isNaN(amount) || amount < 1 || amount > 100) {
-      return message.reply('⚠️ Please enter a number between 1 and 100.');
-    }
-
-    await message.channel.bulkDelete(amount, true)
-      .then(deleted => {
-        message.channel.send(`✅ Deleted **${deleted.size}** messages.`)
-          .then(msg => setTimeout(() => msg.delete(), 5000));
-      })
-      .catch(err => {
-        console.error(err);
-        message.reply('❌ I can’t delete messages older than 14 days.');
-      });
-  }
-});
-// --- AI-Powered Responses (when bot is mentioned) ---
-import OpenAI from "openai";
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY, // put this in your .env file
-});
-
-client.on("messageCreate", async message => {
-  if (message.author.bot) return;
-
-  // Only reply when the bot is mentioned
-  if (message.mentions.has(client.user)) {
-    try {
-      await message.channel.sendTyping(); // typing indicator
-
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "You are Agnello FC Friendly Bot, a helpful, funny, and friendly Discord bot for managing friendlies, moderation, and chatting casually." },
-          { role: "user", content: message.content.replace(`<@${client.user.id}>`, "").trim() }
-        ],
-      });
-
-      const reply = completion.choices[0].message?.content || "🤖 I don’t know what to say!";
-      message.reply(reply);
-
-    } catch (err) {
-      console.error("OpenAI error:", err);
-      message.reply("⚠️ Sorry, I had trouble coming up with a reply.");
-    }
-  }
-});
 // -----------------------------
 // Games: spin, coin, slots, blackjack, poker, crime
 // -----------------------------
@@ -328,12 +282,37 @@ client.on('guildMemberRemove', async (member) => {
 });
 
 // -----------------------------
-// Single messageCreate handler (all commands + auto behavior)
+// Single messageCreate handler (all commands, auto behavior, purge, AI mention)
 // -----------------------------
 client.on('messageCreate', async (message) => {
   try {
-    // ignore bots & DMs where not expected
+    // ignore bots
     if (message.author.bot) return;
+
+    // --- AI mention response: if bot is mentioned (no prefix) ---
+    if (message.mentions.has(client.user) && openai) {
+      try {
+        await message.channel.sendTyping();
+
+        // remove mention text from content
+        const userPrompt = message.content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim();
+
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: "You are Agnello FC Friendly Bot, a helpful, funny, and friendly Discord bot for managing friendlies, moderation, and chatting casually." },
+            { role: "user", content: userPrompt || "Hi!" },
+          ],
+        });
+
+        const reply = completion.choices?.[0]?.message?.content?.trim() || "🤖 I don’t know what to say!";
+        await message.reply(reply);
+      } catch (err) {
+        console.error('OpenAI reply error:', err);
+        try { await message.reply('⚠️ Sorry, I had trouble coming up with a reply.'); } catch {}
+      }
+      return; // handle mention only, don't process as command
+    }
 
     // --- Auto react to @everyone / @here ---
     if (message.guild && (message.mentions?.everyone || message.content.includes('@here'))) {
@@ -374,6 +353,27 @@ client.on('messageCreate', async (message) => {
     const parts = raw.split(/\s+/);
     const cmd = parts.shift().toLowerCase();
     const args = parts;
+
+    // ---------- Purge ----------
+    if (cmd === 'purge') {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+        return message.reply('❌ You don’t have permission to purge messages.');
+      }
+      const amount = parseInt(args[0], 10);
+      if (isNaN(amount) || amount < 1 || amount > 100) {
+        return message.reply('⚠️ Please enter a number between 1 and 100.');
+      }
+      await message.channel.bulkDelete(amount, true)
+        .then(deleted => {
+          message.channel.send(`✅ Deleted **${deleted.size}** messages.`)
+            .then(msg => setTimeout(() => msg.delete(), 5000));
+        })
+        .catch(err => {
+          console.error(err);
+          message.reply('❌ I can’t delete messages older than 14 days.');
+        });
+      return;
+    }
 
     // ---------- HELP ----------
     if (cmd === 'help') {
@@ -633,7 +633,6 @@ client.on('messageCreate', async (message) => {
     }
 
     // ---------- Economy & Gambling commands ----------
-    // ensure user exists
     ensureUser(message.author.id);
 
     if (cmd === 'start') return message.reply(`You have ${getBal(message.author.id)} Robux (new users start with 10).`);
