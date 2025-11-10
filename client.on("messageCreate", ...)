@@ -276,35 +276,6 @@ client.on('guildMemberRemove', async (member) => {
   try { await member.send(`😢 Sorry to see you leave **${member.guild.name}**.`).catch(()=>{}); } catch {}
 });
 
-// -----------------------------
-// Single messageCreate handler
-// -----------------------------
-client.on('messageCreate', async (message) => {
-  try {
-    if (message.author.bot) return;
-
-    // If bot is mentioned (and OpenAI available) respond with AI
-    if (message.mentions.has(client.user) && openai) {
-      await message.channel.sendTyping().catch(()=>{});
-      // Strip mention(s)
-      const userPrompt = message.content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim() || 'Hi!';
-      try {
-        // Chat completions in OpenAI Node SDK
-        const completion = await openai.chat.completions.create({
-          model: 'gpt-3.5-turbo',
-          messages: [
-            { role: 'system', content: `You are Agnello FC Friendly Bot, a helpful, funny, and friendly Discord bot for managing friendlies, moderation, and chatting casually.` },
-            { role: 'user', content: userPrompt },
-          ],
-        });
-        const reply = completion?.choices?.[0]?.message?.content?.trim() || '🤖 I did not get a response.';
-        await message.reply(reply).catch(()=>{});
-      } catch (err) {
-        console.error('OpenAI reply error:', err);
-        await message.reply('⚠️ Sorry, I had trouble coming up with a reply.').catch(()=>{});
-      }
-      return;
-    }
 
     // @everyone / @here reaction
     if (message.guild && (message.mentions?.everyone || message.content.includes('@here'))) {
