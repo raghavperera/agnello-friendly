@@ -255,7 +255,6 @@ client.once('ready', () => {
   console.log(`Voice features: ${ENABLE_VOICE ? 'ENABLED' : 'DISABLED'}`);
 });
 
-// -----------------------------
 // Welcome / Farewell
 // -----------------------------
 client.on('guildMemberAdd', async (member) => {
