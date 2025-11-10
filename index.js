@@ -44,7 +44,7 @@ const ECON_FILE = path.join(process.cwd(), 'economy.json');
 // -----------------------------
 const SWEARS = [
   'fuck', 'shit', 'bitch', 'asshole', 'bastard', 'damn', 'crap', 'freak',
-  'sucks', 'idiot', 'stfu', 'wtf'
+  'sucks', 'idiot', 'stfu', 'wtf', 'wtf'
 ];
 
 // -----------------------------
@@ -58,16 +58,7 @@ function safeGetLogChannel(guild) {
   return guild.channels.cache.get(LOG_CHANNEL_ID) || null;
 }
 
-// -----------------------------
-// OpenAI client (optional)
-// -----------------------------
-let openai = null;
-if (OPENAI_API_KEY) {
-  openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-  console.log('OpenAI: enabled');
-} else {
-  console.warn('OpenAI: API key not set. AI mention replies disabled.');
-}
+
 
 // -----------------------------
 // Economy persistence
@@ -340,6 +331,72 @@ client.on('guildMemberRemove', async (member) => {
       }
       return;
     }
+const cmd = parts.shift().toLowerCase();
+const args = parts;
+// !hosttraining
+if (cmd === "hosttraining") {
+    const hostRole = message.guild.roles.cache.get(HOST_ROLE_ID);
+    if (!hostRole) return message.reply("❌ Host role not found in this server.");
+
+    if (!message.member.roles.cache.has(HOST_ROLE_ID) && !message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return message.reply("❌ You are not allowed to host trainings.");
+    }
+
+    // Step 1: Ask for training link
+    message.reply("✅ Send the training link below. You have 60 seconds.");
+
+    const filter = m => m.author.id === message.author.id;
+    const collector = message.channel.createMessageCollector({ filter, max: 1, time: 60000 });
+
+    collector.on("collect", async collected => {
+        const link = collected.content.trim();
+
+        if (!link.startsWith("http")) {
+            return message.reply("❌ That isn't a valid link.");
+        }
+
+        // Create signup embed
+        const embed = new EmbedBuilder()
+            .setColor("Blue")
+            .setTitle("📘 Training Signup")
+            .setDescription(`React ✅ to receive the training link.\nHosted by <@${message.author.id}>`)
+            .setTimestamp();
+
+        const signupMsg = await message.channel.send({ embeds: [embed] });
+        await signupMsg.react("✅");
+
+        // Reaction collector
+        const rFilter = (reaction, user) => reaction.emoji.name === "✅" && !user.bot;
+        const rCollector = signupMsg.createReactionCollector({ filter: rFilter });
+
+        rCollector.on("collect", async (reaction, user) => {
+            try {
+                await user.send(`✅ Here is the training link:\n${link}`);
+            } catch {
+                message.channel.send(`⚠️ <@${user.id}> has DMs closed. Could not send link.`);
+            }
+        });
+    });
+// !message <text>
+if (cmd === "message") {
+    const content = args.join(" ");
+    if (!content) return message.reply("❌ You need to write something.");
+
+    const embed = new EmbedBuilder()
+        .setColor("Green")
+        .setDescription(content)
+        .setFooter({ text: `Sent by ${message.author.tag}` })
+        .setTimestamp();
+
+    return message.channel.send({ embeds: [embed] });
+}
+
+    collector.on("end", c => {
+        if (c.size === 0) {
+            message.reply("❌ You never sent a link. Training cancelled.");
+        }
+    });
+}
 
     // HELP
     if (cmd === 'help') {
