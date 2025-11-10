@@ -318,23 +318,6 @@ client.on('messageCreate', async (message) => {
     if (message.guild && (message.mentions?.everyone || message.content.includes('@here'))) {
       try { await message.react('✅'); } catch {}
     }
-// !message <text>
-if (cmd === "message") {
-    const content = args.join(" ");
-
-    if (!content) {
-        return message.reply("❌ You need to actually write something. I can't beautify thin air.");
-    }
-
-    const embed = new EmbedBuilder()
-        .setColor("Blue")
-        .setTitle("📢 Announcement")
-        .setDescription(content)
-        .setFooter({ text: `Sent by ${message.author.tag}` })
-        .setTimestamp();
-
-    message.channel.send({ embeds: [embed] });
-}
 
     // --- Profanity filter (text) ---
     if (message.guild && message.content) {
@@ -648,7 +631,23 @@ if (cmd === "message") {
       lineups.delete(message.guild.id);
       return message.channel.send('♻️ Lineup reset.');
     }
+// !message <text>
+if (cmd === "message") {
+    const content = args.join(" ");
 
+    if (!content) {
+        return message.reply("❌ You need to actually write something. I can't beautify thin air.");
+    }
+
+    const embed = new EmbedBuilder()
+        .setColor("Blue")
+        .setTitle("📢 Announcement")
+        .setDescription(content)
+        .setFooter({ text: `Sent by ${message.author.tag}` })
+        .setTimestamp();
+
+    message.channel.send({ embeds: [embed] });
+}
     // ---------- Economy & Gambling commands ----------
     ensureUser(message.author.id);
 
