@@ -393,7 +393,7 @@ client.on('messageCreate', async (message) => {
         const embed = new EmbedBuilder()
           .setColor(0x3498db)
           .setTitle('📘 Training Signup')
-          .setDescription(`React ✅ to receive the training link.\nHosted by <@${message.author.id}>`)
+          .setDescription(`@everyone React ✅ to receive the training link.\nHosted by <@${message.author.id}>`)
           .setTimestamp();
 
         const signupMsg = await message.channel.send({ embeds: [embed] }).catch(()=>null);
