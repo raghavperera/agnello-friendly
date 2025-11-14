@@ -296,31 +296,7 @@ client.on('messageCreate', async (message) => {
     // ignore bots
     if (message.author.bot) return;
 
-    // AI mention response (if enabled) - no prefix
-    if (message.mentions.has(client.user) && openai) {
-      try {
-        await message.channel.sendTyping();
-        const userPrompt = message.content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim() || 'Hi!';
-        const completion = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: 'You are Agnello FC Friendly Bot, a helpful, friendly Discord bot for managing friendlies, moderation, and chatting casually.' },
-            { role: 'user', content: userPrompt },
-          ],
-        });
-        const reply = completion.choices?.[0]?.message?.content?.trim() || "🤖 I don’t know what to say!";
-        await message.reply(reply).catch(()=>{});
-      } catch (err) {
-        console.error('OpenAI reply error:', err);
-        try { await message.reply('⚠️ Sorry, I had trouble coming up with a reply.').catch(()=>{}); } catch {}
-      }
-      return; // mention handled
-    }
-
-    // @everyone / @here quick react
-    if (message.guild && (message.mentions?.everyone || message.content.includes('@here'))) {
-      try { await message.react('✅').catch(()=>{}); } catch {}
-    }
+    
 
     // Profanity filter (delete + warn + optional VC mute)
     if (message.guild && message.content) {
