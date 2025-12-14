@@ -37,7 +37,7 @@ const ECON_FILE = path.join(process.cwd(), 'economy.json');
 
 // This is the single allowed server. Bot refuses commands elsewhere.
 const ALLOWED_GUILD_ID = '1357085245983162708';
-const OUTSIDE_REPLY = 'This is NOT Agnello FC. https://discord.gg/nbGxketBSF';
+const OUTSIDE_REPLY = 'This is NOT Agnello FC. https://discord.gg/ZrNuUKJFfS';
 
 // -----------------------------
 // Basic profanity list (non-exhaustive)
