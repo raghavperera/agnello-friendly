@@ -7,7 +7,6 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import express from 'express';
-import OpenAI from 'openai';
 import ytdl from 'ytdl-core';
 import ffmpegPath from 'ffmpeg-static';
 import {
@@ -30,7 +29,6 @@ import {
 // Config - edit env or constants
 // -----------------------------
 const TOKEN = process.env.TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
 const ENABLE_VOICE = (process.env.ENABLE_VOICE === 'true');
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || '1362214241091981452';
 const HOST_ROLE_ID = process.env.HOST_ROLE_ID || '1383970211933454378';
@@ -57,16 +55,6 @@ function safeGetLogChannel(guild) {
   }
 }
 
-// -----------------------------
-// Optional OpenAI client
-// -----------------------------
-let openai = null;
-if (OPENAI_API_KEY) {
-  openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-  console.log('OpenAI client initialized.');
-} else {
-  console.log('OpenAI not configured — AI mention replies disabled.');
-}
 
 // -----------------------------
 // Economy persistence
@@ -305,28 +293,7 @@ client.on('messageCreate', async (message) => {
 
     // Commands only
     if (!message.content.startsWith(PREFIX)) {
-      // AI mention responses (if OpenAI configured) — respond when bot is mentioned (not prefixed)
-      if (openai && message.mentions.has(client.user)) {
-        try {
-          await message.channel.sendTyping();
-          const userPrompt = message.content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim() || 'Hi!';
-          const completion = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages: [
-              { role: 'system', content: 'You are Agnello FC Friendly Bot, helpful and friendly.' },
-              { role: 'user', content: userPrompt },
-            ],
-          });
-          const reply = completion.choices?.[0]?.message?.content || "🤖 I don't have a reply right now.";
-          await message.reply(reply).catch(()=>{});
-        } catch (err) {
-          console.error('OpenAI error:', err);
-          await message.reply('⚠️ I had trouble composing a reply.').catch(()=>{});
-        }
-      }
-      return;
-    }
-
+   
     // Parse prefix command
     const raw = message.content.slice(PREFIX.length).trim();
     if (!raw) return;
