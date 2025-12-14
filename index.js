@@ -192,7 +192,7 @@ async function ensureAllowedGuild(message) {
     // Send the "sorry" reply (once per author to avoid spam). If guild exists but wrong, still reply.
     const key = `${message.author.id}:${guildId || 'DM'}`;
     if (!repliedNotAllowed.has(key)) {
-      try { await message.reply('Sorry! This is not Agnello FC.'); } catch(){}
+      await message.reply('Sorry! This is not Agnello FC.').catch(() => {});
       repliedNotAllowed.add(key);
       // clear after a while so owners can test again if needed
       setTimeout(()=> repliedNotAllowed.delete(key), 60_000);
