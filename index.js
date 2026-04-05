@@ -1,5 +1,5 @@
 // index.js
-// Agnello FC Friendly Bot — rewritten single-file version
+// Ertern FC Friendly Bot — rewritten single-file version
 // Node 18+ / ESM / discord.js v14
 
 import 'dotenv/config';
@@ -33,7 +33,7 @@ const ECON_FILE = path.join(process.cwd(), 'economy.json');
 const PORT = process.env.PORT;
 
 const ALLOWED_GUILD_ID = '1357085245983162708';
-const OUTSIDE_REPLY = 'This is NOT Agnello FC. https://discord.gg/ZrNuUKJFfS';
+const OUTSIDE_REPLY = 'This is NOT Ertern FC. https://discord.gg/ZrNuUKJFfS';
 
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || '1362214241091981452';
 const HOST_ROLE_ID = process.env.HOST_ROLE_ID || '1383970211933454378';
@@ -344,7 +344,7 @@ function lineupEmbed(state) {
 
   return new EmbedBuilder()
     .setColor(0x00a86b)
-    .setTitle('AGNELLO FC 7v7 FRIENDLY')
+    .setTitle('ERTERN FC 7v7 FRIENDLY')
     .setDescription(`${lines}\n\nReact to claim. Host can edit with \`!editlineup\` or \`!resetlineup\`.\n\n✅ **Final Lineup:**\n${final}`);
 }
 
@@ -472,8 +472,8 @@ client.on('messageCreate', async (message) => {
     if (cmd === 'help') {
       const help = new EmbedBuilder()
         .setColor('#00AAFF')
-        .setTitle('📖 Agnello FC Friendly Bot — Help')
-        .setDescription('Commands available for Agnello FC members')
+        .setTitle('📖 Ertern FC Friendly Bot — Help')
+        .setDescription('Commands available for Ertern FC members')
         .addFields(
           { name: '⚽ Friendlies', value: '`!hostfriendly [pos|number]` — post lineup (GK,CB,CB2,CM,LW,RW,ST). React to claim.' },
           { name: '🛠 Moderation', value: '`!ban @user`, `!unban <id>`, `!kick @user`, `!timeout @user <s>`, `!vmute @user`' },
@@ -1013,7 +1013,7 @@ async function playTrack(guildId, url, textChannel) {
 // Keepalive server
 // -----------------------------
 const app = express();
-app.get('/', (_req, res) => res.send('✅ Agnello FC Bot is alive and running!'));
+app.get('/', (_req, res) => res.send('✅ Ertern FC Bot is alive and running!'));
 app.listen(PORT, '0.0.0.0', () => console.log(`🌍 Keepalive server listening on http://0.0.0.0:${PORT}`));
 
 // -----------------------------
