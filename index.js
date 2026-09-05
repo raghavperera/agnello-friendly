@@ -1,5 +1,5 @@
 // index.js
-// Ertern FC Friendly Bot — rewritten single-file version
+// erts United Friendly Bot
 // Node 18+ / ESM / discord.js v14
 
 import 'dotenv/config';
@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import ytdl from 'ytdl-core';
+
 import {
   Client,
   GatewayIntentBits,
@@ -14,6 +15,7 @@ import {
   EmbedBuilder,
   PermissionsBitField,
 } from 'discord.js';
+
 import {
   joinVoiceChannel,
   getVoiceConnection,
@@ -29,16 +31,23 @@ import {
 const TOKEN = process.env.TOKEN;
 const ENABLE_VOICE = process.env.ENABLE_VOICE === 'true';
 const PREFIX = process.env.PREFIX || '!';
-const ECON_FILE = path.join(process.cwd(), 'economy.json');
-const PORT = process.env.PORT;
 
-const ALLOWED_GUILD_ID = '1357085245983162708';
-const OUTSIDE_REPLY = 'This is NOT Ertern FC. https://discord.gg/ZrNuUKJFfS';
+const PORT = process.env.PORT || 10000;
 
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || '1362214241091981452';
-const HOST_ROLE_ID = process.env.HOST_ROLE_ID || '1383970211933454378';
-const WELCOME_CHANNEL_ID = process.env.WELCOME_CHANNEL_ID || '1403929923084882012';
-const FAREWELL_CHANNEL_ID = process.env.FAREWELL_CHANNEL_ID || '1403930222222643220';
+const ALLOWED_GUILD_ID = '1540116395558313995';
+const HOST_ROLE_ID = '1541193960041615361';
+
+const OUTSIDE_REPLY =
+  'This is NOT erts United.';
+
+const LOG_CHANNEL_ID =
+  process.env.LOG_CHANNEL_ID || '1362214241091981452';
+
+const WELCOME_CHANNEL_ID =
+  process.env.WELCOME_CHANNEL_ID || '1403929923084882012';
+
+const FAREWELL_CHANNEL_ID =
+  process.env.FAREWELL_CHANNEL_ID || '1403930222222643220';
 
 // -----------------------------
 // Lists / constants
@@ -58,18 +67,20 @@ const SWEARS = [
   'wtf',
 ];
 
-const COOLDOWNS = new Map(); // key -> timestamp
+const COOLDOWNS = new Map();
 const textWarnings = new Map();
+
 const musicQueues = new Map();
 const audioPlayers = new Map();
+
 const lineups = new Map();
 const hostfriendlyCounts = new Map();
 
 // -----------------------------
 // Small helpers
 // -----------------------------
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+const sleep = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 function safeGetLogChannel(guild) {
   if (!guild) return null;
@@ -79,7 +90,9 @@ function safeGetLogChannel(guild) {
 function cooldownReady(key, ms) {
   const now = Date.now();
   const last = COOLDOWNS.get(key) || 0;
+
   if (now - last < ms) return false;
+
   COOLDOWNS.set(key, now);
   return true;
 }
@@ -89,263 +102,40 @@ function isAllowedGuild(message) {
 }
 
 function isPrefixedCommand(message) {
-  return typeof message.content === 'string' && message.content.startsWith(PREFIX);
-}
-
-function parseBet(arg, max) {
-  if (!arg) return null;
-  const s = String(arg).trim().toLowerCase();
-  if (s === 'all') return max;
-  if (s.endsWith('%')) {
-    const p = parseFloat(s.slice(0, -1));
-    if (Number.isNaN(p) || p <= 0) return null;
-    return Math.max(1, Math.floor((p / 100) * max));
-  }
-  const n = parseInt(s, 10);
-  if (Number.isNaN(n) || n <= 0) return null;
-  return n;
-}
-
-function formatHand(cards) {
-  return cards.map((c) => c.rank).join(' ');
+  return (
+    typeof message.content === 'string' &&
+    message.content.startsWith(PREFIX)
+  );
 }
 
 // -----------------------------
-// Economy persistence
+// Lineup helper
 // -----------------------------
-let ECON = {};
-try {
-  if (!fs.existsSync(ECON_FILE)) fs.writeFileSync(ECON_FILE, JSON.stringify({}), 'utf8');
-  ECON = JSON.parse(fs.readFileSync(ECON_FILE, 'utf8') || '{}');
-} catch (e) {
-  console.error('Failed to load economy file:', e);
-  ECON = {};
-}
-
-function saveEconomy() {
-  try {
-    fs.writeFileSync(ECON_FILE, JSON.stringify(ECON, null, 2), 'utf8');
-  } catch (e) {
-    console.error('Failed to save economy file:', e);
-  }
-}
-
-function ensureUser(id) {
-  if (!ECON[id]) ECON[id] = { balance: 10 };
-  if (typeof ECON[id].balance !== 'number') ECON[id].balance = 10;
-  return ECON[id];
-}
-
-function getBal(id) {
-  return ensureUser(id).balance || 0;
-}
-
-function addBal(id, n) {
-  ensureUser(id);
-  ECON[id].balance = Math.max(0, Math.floor((ECON[id].balance || 0) + n));
-  saveEconomy();
-  return ECON[id].balance;
-}
-
-function subBal(id, n) {
-  ensureUser(id);
-  ECON[id].balance = Math.max(0, Math.floor((ECON[id].balance || 0) - n));
-  saveEconomy();
-  return ECON[id].balance;
-}
-
-// -----------------------------
-// Games / gambling helpers
-// -----------------------------
-function spinWheel(bet) {
-  const wheel = [0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 5, 10, 20, 50];
-  const pick = wheel[randInt(0, wheel.length - 1)];
-  return Math.floor(pick * bet);
-}
-
-function coinFlip(bet) {
-  return Math.random() < 0.5 ? bet : -bet;
-}
-
-function slotsResult(bet) {
-  const syms = ['🍒', '🍋', '🔔', '⭐', '💎'];
-  const r1 = syms[randInt(0, syms.length - 1)];
-  const r2 = syms[randInt(0, syms.length - 1)];
-  const r3 = syms[randInt(0, syms.length - 1)];
-
-  let payout = 0;
-  if (r1 === r2 && r2 === r3) {
-    payout = r1 === '💎' ? bet * 10 : r1 === '⭐' ? bet * 6 : r1 === '🔔' ? bet * 4 : bet * 3;
-  } else if (r1 === r2 || r2 === r3 || r1 === r3) {
-    payout = Math.floor(bet * 1.5);
-  } else {
-    payout = -bet;
-  }
-
-  return { display: `${r1} ${r2} ${r3}`, payout };
-}
-
-function drawCard() {
-  const ranks = [
-    ['A', 11],
-    ['2', 2],
-    ['3', 3],
-    ['4', 4],
-    ['5', 5],
-    ['6', 6],
-    ['7', 7],
-    ['8', 8],
-    ['9', 9],
-    ['10', 10],
-    ['J', 10],
-    ['Q', 10],
-    ['K', 10],
-  ];
-  const r = ranks[randInt(0, ranks.length - 1)];
-  return { rank: r[0], value: r[1] };
-}
-
-function handValue(cards) {
-  let total = cards.reduce((sum, c) => sum + c.value, 0);
-  const aces = cards.filter((c) => c.rank === 'A').length;
-  for (let i = 0; i < aces && total > 21; i++) total -= 10;
-  return total;
-}
-
-function blackjackResolve(bet) {
-  const player = [drawCard(), drawCard()];
-  const dealer = [drawCard(), drawCard()];
-
-  while (handValue(player) < 17) player.push(drawCard());
-  while (handValue(dealer) < 17) dealer.push(drawCard());
-
-  const pv = handValue(player);
-  const dv = handValue(dealer);
-
-  let payout = 0;
-  let result = 'push';
-
-  if (pv > 21) {
-    result = 'bust';
-    payout = -bet;
-  } else if (dv > 21) {
-    result = 'dealer_bust';
-    payout = bet;
-  } else if (pv > dv) {
-    result = 'win';
-    payout = bet;
-  } else if (pv < dv) {
-    result = 'lose';
-    payout = -bet;
-  }
-
-  return { player, dealer, pv, dv, result, payout };
-}
-
-function buildDeck() {
-  const suits = ['♠', '♥', '♦', '♣'];
-  const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
-  const deck = [];
-  for (const s of suits) for (const r of ranks) deck.push({ s, r });
-  return deck;
-}
-
-function shuffle(deck) {
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = randInt(0, i);
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
-  return deck;
-}
-
-function rankValue(r) {
-  const order = { '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, J: 11, Q: 12, K: 13, A: 14 };
-  return order[r];
-}
-
-function isStraight(vals) {
-  const sorted = vals.slice().sort((a, b) => a - b);
-  let seq = true;
-  for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i] !== sorted[i - 1] + 1) {
-      seq = false;
-      break;
-    }
-  }
-  if (seq) return true;
-
-  if (sorted.includes(14)) {
-    const alt = sorted.map((v) => (v === 14 ? 1 : v)).sort((a, b) => a - b);
-    for (let i = 1; i < alt.length; i++) {
-      if (alt[i] !== alt[i - 1] + 1) return false;
-    }
-    return true;
-  }
-
-  return false;
-}
-
-function evaluateHand(cards) {
-  const vals = cards.map((c) => rankValue(c.r));
-  const suits = cards.map((c) => c.s);
-  const counts = {};
-  for (const v of vals) counts[v] = (counts[v] || 0) + 1;
-  const countsSorted = Object.values(counts).sort((a, b) => b - a);
-  const flush = suits.every((s) => s === suits[0]);
-  const straight = isStraight(vals.slice());
-
-  if (straight && flush) return { rank: 8, name: 'Straight Flush', t: Math.max(...vals) };
-  if (countsSorted[0] === 4) return { rank: 7, name: 'Four of a Kind', t: parseInt(Object.keys(counts).find((k) => counts[k] === 4), 10) };
-  if (countsSorted[0] === 3 && countsSorted[1] === 2) return { rank: 6, name: 'Full House', t: parseInt(Object.keys(counts).find((k) => counts[k] === 3), 10) };
-  if (flush) return { rank: 5, name: 'Flush', t: Math.max(...vals) };
-  if (straight) return { rank: 4, name: 'Straight', t: Math.max(...vals) };
-  if (countsSorted[0] === 3) return { rank: 3, name: 'Three of a Kind', t: parseInt(Object.keys(counts).find((k) => counts[k] === 3), 10) };
-  if (countsSorted[0] === 2 && countsSorted[1] === 2) {
-    const pairs = Object.keys(counts)
-      .filter((k) => counts[k] === 2)
-      .map((x) => parseInt(x, 10))
-      .sort((a, b) => b - a);
-    return { rank: 2, name: 'Two Pair', t: pairs[0] * 100 + pairs[1] };
-  }
-  if (countsSorted[0] === 2) return { rank: 1, name: 'One Pair', t: parseInt(Object.keys(counts).find((k) => counts[k] === 2), 10) };
-  return { rank: 0, name: 'High Card', t: Math.max(...vals) };
-}
-
-function compareHands(a, b) {
-  if (a.rank !== b.rank) return a.rank - b.rank;
-  return a.t - b.t;
-}
-
-function pokerResolve(bet) {
-  const deck = shuffle(buildDeck());
-  const player = deck.splice(0, 5);
-  const dealer = deck.splice(0, 5);
-  const pr = evaluateHand(player);
-  const dr = evaluateHand(dealer);
-  const cmp = compareHands(pr, dr);
-  const payout = cmp > 0 ? bet : cmp < 0 ? -bet : 0;
-  return { player, dealer, pr, dr, payout };
-}
-
-function crimeAttempt() {
-  const r = Math.random();
-  if (r < 0.45) return { success: true, amount: randInt(5, 50) };
-  return { success: false, fine: randInt(10, 60) };
-}
-
 function lineupEmbed(state) {
   const lines = state.positions
-    .map((pos, i) => `${state.numbers[i]} ➜ **${pos}**\n${state.taken[i] ? `<@${state.taken[i]}>` : '_-_'}`)
+    .map(
+      (pos, i) =>
+        `${state.numbers[i]} ➜ **${pos}**\n${
+          state.taken[i] ? `<@${state.taken[i]}>` : '_-_'
+        }`
+    )
     .join('\n\n');
 
   const final = state.positions
-    .map((pos, i) => `${pos}: ${state.taken[i] ? `<@${state.taken[i]}>` : '_-_'}`)
+    .map(
+      (pos, i) =>
+        `${pos}: ${
+          state.taken[i] ? `<@${state.taken[i]}>` : '_-_'
+        }`
+    )
     .join('\n');
 
   return new EmbedBuilder()
     .setColor(0x00a86b)
-    .setTitle('ERTERN FC 7v7 FRIENDLY')
-    .setDescription(`${lines}\n\nReact to claim. Host can edit with \`!editlineup\` or \`!resetlineup\`.\n\n✅ **Final Lineup:**\n${final}`);
+    .setTitle('ERTS UNITED 7v7 FRIENDLY')
+    .setDescription(
+      `${lines}\n\nReact to claim. Host can edit with \`!editlineup\` or \`!resetlineup\`.\n\n✅ **Final Lineup:**\n${final}`
+    );
 }
 
 // -----------------------------
@@ -361,32 +151,75 @@ const client = new Client({
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.DirectMessages,
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
+
+  partials: [
+    Partials.Channel,
+    Partials.Message,
+    Partials.Reaction,
+  ],
 });
 
-client.once('ready', () => {
+// -----------------------------
+// Ready
+// -----------------------------
+client.once('clientReady', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   console.log(`Allowed Guild: ${ALLOWED_GUILD_ID}`);
-  console.log(`Voice features: ${ENABLE_VOICE ? 'ENABLED (host must support UDP)' : 'DISABLED'}`);
+  console.log(`Friendly Hoster Role: ${HOST_ROLE_ID}`);
+  console.log(
+    `Voice features: ${
+      ENABLE_VOICE
+        ? 'ENABLED (host must support UDP)'
+        : 'DISABLED'
+    }`
+  );
 });
 
+// -----------------------------
+// Welcome
+// -----------------------------
 client.on('guildMemberAdd', async (member) => {
   try {
     if (member.guild.id !== ALLOWED_GUILD_ID) return;
-    await member.guild.channels.cache.get(WELCOME_CHANNEL_ID)?.send(`👋 Welcome, ${member}!`);
-    await member.send(`👋 Welcome to **${member.guild.name}**!`);
+
+    const welcomeChannel =
+      member.guild.channels.cache.get(WELCOME_CHANNEL_ID);
+
+    await welcomeChannel
+      ?.send(`👋 Welcome to **erts United**, ${member}!`);
+
+    await member
+      .send(
+        `👋 Welcome to **${member.guild.name}**!`
+      )
+      .catch(() => {});
   } catch {
-    // ignore DM errors
+    // Ignore errors
   }
 });
 
+// -----------------------------
+// Farewell
+// -----------------------------
 client.on('guildMemberRemove', async (member) => {
   try {
     if (member.guild.id !== ALLOWED_GUILD_ID) return;
-    await member.guild.channels.cache.get(FAREWELL_CHANNEL_ID)?.send(`👋 Goodbye, **${member.user.tag}**!`);
-    await member.send(`😢 Sorry to see you leave **${member.guild.name}**.`);
+
+    const farewellChannel =
+      member.guild.channels.cache.get(FAREWELL_CHANNEL_ID);
+
+    await farewellChannel
+      ?.send(
+        `👋 Goodbye, **${member.user.tag}**!`
+      );
+
+    await member
+      .send(
+        `😢 Sorry to see you leave **${member.guild.name}**.`
+      )
+      .catch(() => {});
   } catch {
-    // ignore DM errors
+    // Ignore errors
   }
 });
 
@@ -397,40 +230,74 @@ client.on('messageCreate', async (message) => {
   try {
     if (message.author?.bot) return;
 
-    const commandAttempt = isPrefixedCommand(message);
-    if (commandAttempt && !isAllowedGuild(message)) {
+    const commandAttempt =
+      isPrefixedCommand(message);
+
+    // -------------------------
+    // Outside server protection
+    // -------------------------
+    if (
+      commandAttempt &&
+      !isAllowedGuild(message)
+    ) {
       try {
         await message.reply(OUTSIDE_REPLY);
       } catch {
         try {
           await message.channel.send(OUTSIDE_REPLY);
         } catch {
-          // ignore
+          // Ignore
         }
       }
+
       return;
     }
 
     if (!isAllowedGuild(message)) return;
 
-    if (message.mentions?.everyone || message.content.includes('@here')) {
+    // -------------------------
+    // React to @everyone / @here
+    // -------------------------
+    if (
+      message.mentions?.everyone ||
+      message.content.includes('@here')
+    ) {
       await message.react('✅').catch(() => {});
     }
 
-    // profanity filter
+    // -------------------------
+    // Profanity filter
+    // -------------------------
     if (message.content) {
-      const lowered = message.content.toLowerCase();
-      if (SWEARS.some((w) => lowered.includes(w))) {
+      const lowered =
+        message.content.toLowerCase();
+
+      const foundSwear = SWEARS.some((word) => {
+        const regex = new RegExp(
+          `\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+          'i'
+        );
+
+        return regex.test(lowered);
+      });
+
+      if (foundSwear) {
         await message.delete().catch(() => {});
-        const count = (textWarnings.get(message.author.id) || 0) + 1;
-        textWarnings.set(message.author.id, count);
+
+        const count =
+          (textWarnings.get(message.author.id) || 0) + 1;
+
+        textWarnings.set(
+          message.author.id,
+          count
+        );
 
         try {
           await message.author.send(
             `⚠️ Your message in **${message.guild.name}** was removed for language:\n> ${message.content}\nThis is your **${count} warning**.`
           );
         } catch {
-          // ignore DMs
+          // Ignore DM errors
         }
 
         safeGetLogChannel(message.guild)
@@ -440,549 +307,1486 @@ client.on('messageCreate', async (message) => {
           .catch(() => {});
 
         const member = message.member;
-        if (member && member.voice?.channel && member.manageable) {
+
+        if (
+          member &&
+          member.voice?.channel &&
+          member.manageable
+        ) {
           try {
-            await member.voice.setMute(true, 'Auto-moderation: swearing');
-            safeGetLogChannel(message.guild)?.send(`🔇 Auto VC mute applied to **${member.user.tag}** for 10s.`).catch(() => {});
+            await member.voice.setMute(
+              true,
+              'Auto-moderation: swearing'
+            );
+
+            safeGetLogChannel(message.guild)
+              ?.send(
+                `🔇 Auto VC mute applied to **${member.user.tag}** for 10s.`
+              )
+              .catch(() => {});
+
             setTimeout(async () => {
               try {
-                if (member.voice?.channel) await member.voice.setMute(false, 'Auto-moderation expired');
+                if (member.voice?.channel) {
+                  await member.voice.setMute(
+                    false,
+                    'Auto-moderation expired'
+                  );
+                }
               } catch {
-                // ignore
+                // Ignore
               }
             }, 10_000);
           } catch {
-            // ignore
+            // Ignore
           }
         }
+
         return;
       }
     }
 
     if (!commandAttempt) return;
 
-    const raw = message.content.slice(PREFIX.length).trim();
+    const raw = message.content
+      .slice(PREFIX.length)
+      .trim();
+
     if (!raw) return;
 
     const parts = raw.split(/\s+/);
     const cmd = parts.shift().toLowerCase();
     const args = parts;
 
+    // -------------------------
     // HELP
+    // -------------------------
     if (cmd === 'help') {
       const help = new EmbedBuilder()
         .setColor('#00AAFF')
-        .setTitle('📖 Ertern FC Friendly Bot — Help')
-        .setDescription('Commands available for Ertern FC members')
+        .setTitle(
+          '📖 erts United Friendly Bot — Help'
+        )
+        .setDescription(
+          'Commands available for erts United members'
+        )
         .addFields(
-          { name: '⚽ Friendlies', value: '`!hostfriendly [pos|number]` — post lineup (GK,CB,CB2,CM,LW,RW,ST). React to claim.' },
-          { name: '🛠 Moderation', value: '`!ban @user`, `!unban <id>`, `!kick @user`, `!timeout @user <s>`, `!vmute @user`' },
-          { name: '🎵 Music', value: '`!joinvc`, `!leavevc`, `!play <YouTubeURL>`, `!skip`, `!stop` (voice host required)' },
-          { name: '👥 Activity', value: '`!activitycheck <goal>` — reacts with ✅' },
-          { name: '✉️ DM Tools', value: '`!dmrole <roleId> <message>`, `!dmall <message>` (Admins only)' },
-          { name: '💰 Economy', value: '`!bal`, `!give @user <amt>`, `!spin`, `!coin`, `!slots`, `!blackjack`, `!poker`, `!crime`' },
-          { name: '📢 Utility', value: '`!message <text>` — bot posts a neat embed announcement\n`!hosttraining` — host posts a training signup link\n`!purge <1-100>` — bulk delete messages' }
+          {
+            name: '⚽ Friendlies',
+            value:
+              '`!hostfriendly [pos|number]` — post lineup (GK, CB, CB2, CM, LW, RW, ST). React to claim.',
+          },
+          {
+            name: '🛠 Moderation',
+            value:
+              '`!ban @user`, `!unban <id>`, `!kick @user`, `!timeout @user <s>`, `!vmute @user`',
+          },
+          {
+            name: '🎵 Music',
+            value:
+              '`!joinvc`, `!leavevc`, `!play <YouTubeURL>`, `!skip`, `!stop`',
+          },
+          {
+            name: '👥 Activity',
+            value:
+              '`!activitycheck <goal>` — posts an activity check.',
+          },
+          {
+            name: '✉️ DM Tools',
+            value:
+              '`!dmrole <roleId> <message>`, `!dmall <message>` (Admins only)',
+          },
+          {
+            name: '📢 Utility',
+            value:
+              '`!message <text>` — bot posts a neat embed announcement\n`!hosttraining` — host posts a training signup link\n`!purge <1-100>` — bulk delete messages',
+          }
         );
-      return message.channel.send({ embeds: [help] }).catch(() => {});
+
+      return message.channel
+        .send({ embeds: [help] })
+        .catch(() => {});
     }
 
+    // -------------------------
     // PURGE
+    // -------------------------
     if (cmd === 'purge') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-        return message.reply('❌ You do not have permission to purge messages.').catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.ManageMessages
+        )
+      ) {
+        return message
+          .reply(
+            '❌ You do not have permission to purge messages.'
+          )
+          .catch(() => {});
       }
 
       const amount = parseInt(args[0], 10);
-      if (Number.isNaN(amount) || amount < 1 || amount > 100) {
-        return message.reply('⚠️ Please enter a number between 1 and 100.').catch(() => {});
+
+      if (
+        Number.isNaN(amount) ||
+        amount < 1 ||
+        amount > 100
+      ) {
+        return message
+          .reply(
+            '⚠️ Please enter a number between 1 and 100.'
+          )
+          .catch(() => {});
       }
 
       try {
-        const deleted = await message.channel.bulkDelete(amount, true);
-        const confirm = await message.channel.send(`✅ Deleted **${deleted.size}** messages.`).catch(() => null);
-        if (confirm) setTimeout(() => confirm.delete().catch(() => {}), 5000);
+        const deleted =
+          await message.channel.bulkDelete(
+            amount,
+            true
+          );
+
+        const confirm =
+          await message.channel
+            .send(
+              `✅ Deleted **${deleted.size}** messages.`
+            )
+            .catch(() => null);
+
+        if (confirm) {
+          setTimeout(
+            () =>
+              confirm.delete().catch(() => {}),
+            5000
+          );
+        }
       } catch (err) {
-        console.error('Bulk delete error:', err);
-        return message.reply('❌ I cannot delete messages older than 14 days or an error occurred.').catch(() => {});
+        console.error(
+          'Bulk delete error:',
+          err
+        );
+
+        return message
+          .reply(
+            '❌ I cannot delete messages older than 14 days or an error occurred.'
+          )
+          .catch(() => {});
       }
+
       return;
     }
 
-    // MODERATION
+    // -------------------------
+    // BAN
+    // -------------------------
     if (cmd === 'ban') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return message.reply('❌ Missing permission: BanMembers').catch(() => {});
-      const target = message.mentions.members.first();
-      const reason = args.slice(1).join(' ') || 'No reason';
-      if (!target) return message.reply('Usage: `!ban @user [reason]`').catch(() => {});
-      await target.ban({ reason }).catch((e) => message.reply(`Failed: ${e.message}`).catch(() => {}));
-      message.channel.send(`🔨 Banned ${target.user.tag}`).catch(() => {});
-      safeGetLogChannel(message.guild)?.send(`🔨 Ban: ${message.author.tag} -> ${target.user.tag} — ${reason}`).catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.BanMembers
+        )
+      ) {
+        return message
+          .reply(
+            '❌ Missing permission: BanMembers'
+          )
+          .catch(() => {});
+      }
+
+      const target =
+        message.mentions.members.first();
+
+      const reason =
+        args.slice(1).join(' ') ||
+        'No reason';
+
+      if (!target) {
+        return message
+          .reply(
+            'Usage: `!ban @user [reason]`'
+          )
+          .catch(() => {});
+      }
+
+      try {
+        await target.ban({ reason });
+
+        await message.channel.send(
+          `🔨 Banned ${target.user.tag}`
+        );
+
+        safeGetLogChannel(message.guild)
+          ?.send(
+            `🔨 Ban: ${message.author.tag} -> ${target.user.tag} — ${reason}`
+          )
+          .catch(() => {});
+      } catch (e) {
+        await message
+          .reply(`Failed: ${e.message}`)
+          .catch(() => {});
+      }
+
       return;
     }
 
+    // -------------------------
+    // UNBAN
+    // -------------------------
     if (cmd === 'unban') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return message.reply('❌ Missing permission: BanMembers').catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.BanMembers
+        )
+      ) {
+        return message
+          .reply(
+            '❌ Missing permission: BanMembers'
+          )
+          .catch(() => {});
+      }
+
       const id = args[0];
-      if (!id) return message.reply('Usage: `!unban <userId>`').catch(() => {});
-      await message.guild.bans.remove(id).catch((e) => message.reply(`Failed: ${e.message}`).catch(() => {}));
-      message.channel.send(`✅ Unbanned ${id}`).catch(() => {});
-      safeGetLogChannel(message.guild)?.send(`✅ Unban: ${message.author.tag} -> ${id}`).catch(() => {});
+
+      if (!id) {
+        return message
+          .reply(
+            'Usage: `!unban <userId>`'
+          )
+          .catch(() => {});
+      }
+
+      try {
+        await message.guild.bans.remove(id);
+
+        await message.channel.send(
+          `✅ Unbanned ${id}`
+        );
+
+        safeGetLogChannel(message.guild)
+          ?.send(
+            `✅ Unban: ${message.author.tag} -> ${id}`
+          )
+          .catch(() => {});
+      } catch (e) {
+        await message
+          .reply(`Failed: ${e.message}`)
+          .catch(() => {});
+      }
+
       return;
     }
 
+    // -------------------------
+    // KICK
+    // -------------------------
     if (cmd === 'kick') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) return message.reply('❌ Missing permission: KickMembers').catch(() => {});
-      const target = message.mentions.members.first();
-      const reason = args.slice(1).join(' ') || 'No reason';
-      if (!target) return message.reply('Usage: `!kick @user [reason]`').catch(() => {});
-      await target.kick(reason).catch((e) => message.reply(`Failed: ${e.message}`).catch(() => {}));
-      message.channel.send(`👢 Kicked ${target.user.tag}`).catch(() => {});
-      safeGetLogChannel(message.guild)?.send(`👢 Kick: ${message.author.tag} -> ${target.user.tag} — ${reason}`).catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.KickMembers
+        )
+      ) {
+        return message
+          .reply(
+            '❌ Missing permission: KickMembers'
+          )
+          .catch(() => {});
+      }
+
+      const target =
+        message.mentions.members.first();
+
+      const reason =
+        args.slice(1).join(' ') ||
+        'No reason';
+
+      if (!target) {
+        return message
+          .reply(
+            'Usage: `!kick @user [reason]`'
+          )
+          .catch(() => {});
+      }
+
+      try {
+        await target.kick(reason);
+
+        await message.channel.send(
+          `👢 Kicked ${target.user.tag}`
+        );
+
+        safeGetLogChannel(message.guild)
+          ?.send(
+            `👢 Kick: ${message.author.tag} -> ${target.user.tag} — ${reason}`
+          )
+          .catch(() => {});
+      } catch (e) {
+        await message
+          .reply(`Failed: ${e.message}`)
+          .catch(() => {});
+      }
+
       return;
     }
 
+    // -------------------------
+    // TIMEOUT
+    // -------------------------
     if (cmd === 'timeout') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) return message.reply('❌ Missing permission: ModerateMembers').catch(() => {});
-      const target = message.mentions.members.first();
-      const seconds = parseInt(args[1] || args[0], 10);
-      if (!target || Number.isNaN(seconds)) return message.reply('Usage: `!timeout @user <seconds>`').catch(() => {});
-      await target.timeout(seconds * 1000, `By ${message.author.tag}`).catch((e) => message.reply(`Failed: ${e.message}`).catch(() => {}));
-      message.channel.send(`⏲️ Timed out ${target.user.tag} for ${seconds}s`).catch(() => {});
-      safeGetLogChannel(message.guild)?.send(`⏲️ Timeout: ${message.author.tag} -> ${target.user.tag} (${seconds}s)`).catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.ModerateMembers
+        )
+      ) {
+        return message
+          .reply(
+            '❌ Missing permission: ModerateMembers'
+          )
+          .catch(() => {});
+      }
+
+      const target =
+        message.mentions.members.first();
+
+      const seconds = parseInt(
+        args[1] || args[0],
+        10
+      );
+
+      if (
+        !target ||
+        Number.isNaN(seconds) ||
+        seconds <= 0
+      ) {
+        return message
+          .reply(
+            'Usage: `!timeout @user <seconds>`'
+          )
+          .catch(() => {});
+      }
+
+      try {
+        await target.timeout(
+          seconds * 1000,
+          `By ${message.author.tag}`
+        );
+
+        await message.channel.send(
+          `⏲️ Timed out ${target.user.tag} for ${seconds}s`
+        );
+
+        safeGetLogChannel(message.guild)
+          ?.send(
+            `⏲️ Timeout: ${message.author.tag} -> ${target.user.tag} (${seconds}s)`
+          )
+          .catch(() => {});
+      } catch (e) {
+        await message
+          .reply(`Failed: ${e.message}`)
+          .catch(() => {});
+      }
+
       return;
     }
 
+    // -------------------------
+    // VMUTE
+    // -------------------------
     if (cmd === 'vmute') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) return message.reply('❌ Missing permission: ModerateMembers').catch(() => {});
-      const target = message.mentions.members.first();
-      if (!target) return message.reply('Usage: `!vmute @user`').catch(() => {});
-      if (!target.voice?.channel) return message.reply('User not in VC.').catch(() => {});
-      await target.voice.setMute(true, `Manual VMute by ${message.author.tag}`).catch((e) => message.reply(`Failed: ${e.message}`).catch(() => {}));
-      message.channel.send(`🔇 Voice-muted ${target.user.tag}`).catch(() => {});
-      safeGetLogChannel(message.guild)?.send(`🔇 VMute: ${message.author.tag} -> ${target.user.tag}`).catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.ModerateMembers
+        )
+      ) {
+        return message
+          .reply(
+            '❌ Missing permission: ModerateMembers'
+          )
+          .catch(() => {});
+      }
+
+      const target =
+        message.mentions.members.first();
+
+      if (!target) {
+        return message
+          .reply(
+            'Usage: `!vmute @user`'
+          )
+          .catch(() => {});
+      }
+
+      if (!target.voice?.channel) {
+        return message
+          .reply('User not in VC.')
+          .catch(() => {});
+      }
+
+      try {
+        await target.voice.setMute(
+          true,
+          `Manual VMute by ${message.author.tag}`
+        );
+
+        await message.channel.send(
+          `🔇 Voice-muted ${target.user.tag}`
+        );
+
+        safeGetLogChannel(message.guild)
+          ?.send(
+            `🔇 VMute: ${message.author.tag} -> ${target.user.tag}`
+          )
+          .catch(() => {});
+      } catch (e) {
+        await message
+          .reply(`Failed: ${e.message}`)
+          .catch(() => {});
+      }
+
       return;
     }
 
-    // DM UTILITIES
+    // -------------------------
+    // DM ROLE
+    // -------------------------
     if (cmd === 'dmrole') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return message.reply('Admins only.').catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.Administrator
+        )
+      ) {
+        return message
+          .reply('Admins only.')
+          .catch(() => {});
+      }
+
       const roleId = args.shift();
       const text = args.join(' ');
-      if (!roleId || !text) return message.reply('Usage: `!dmrole <roleId> <message>`').catch(() => {});
-      const role = message.guild.roles.cache.get(roleId);
-      if (!role) return message.reply('Role not found.').catch(() => {});
-      const members = await message.guild.members.fetch();
-      let count = 0;
-      for (const member of members.filter((m) => m.roles.cache.has(role.id) && !m.user.bot).values()) {
-        member.send(`${text}\n\n*dm sent by ${message.author.tag}*`).catch(() => {});
-        count++;
+
+      if (!roleId || !text) {
+        return message
+          .reply(
+            'Usage: `!dmrole <roleId> <message>`'
+          )
+          .catch(() => {});
       }
-      message.channel.send(`📩 DMed ${count} members with role <@&${role.id}>.`).catch(() => {});
+
+      const role =
+        message.guild.roles.cache.get(roleId);
+
+      if (!role) {
+        return message
+          .reply('Role not found.')
+          .catch(() => {});
+      }
+
+      const members =
+        await message.guild.members.fetch();
+
+      let count = 0;
+
+      for (
+        const member of members.filter(
+          (m) =>
+            m.roles.cache.has(role.id) &&
+            !m.user.bot
+        ).values()
+      ) {
+        member
+          .send(
+            `${text}\n\n*DM sent by ${message.author.tag}*`
+          )
+          .catch(() => {});
+
+        count++;
+
+        await sleep(500);
+      }
+
+      await message.channel.send(
+        `📩 DMed ${count} members with role <@&${role.id}>.`
+      );
+
       return;
     }
 
+    // -------------------------
+    // DM ALL
+    // -------------------------
     if (cmd === 'dmall') {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return message.reply('Admins only.').catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.Administrator
+        )
+      ) {
+        return message
+          .reply('Admins only.')
+          .catch(() => {});
+      }
+
       const text = args.join(' ');
-      if (!text) return message.reply('Usage: `!dmall <message>`').catch(() => {});
-      const members = await message.guild.members.fetch();
+
+      if (!text) {
+        return message
+          .reply(
+            'Usage: `!dmall <message>`'
+          )
+          .catch(() => {});
+      }
+
+      const members =
+        await message.guild.members.fetch();
+
       let count = 0;
+
       for (const member of members.values()) {
         if (member.user.bot) continue;
-        member.send(`${text}\n\n*dm sent by ${message.author.tag}*`).catch(() => {});
+
+        member
+          .send(
+            `${text}\n\n*DM sent by ${message.author.tag}*`
+          )
+          .catch(() => {});
+
         count++;
+
+        await sleep(500);
       }
-      message.channel.send(`📩 DMed ${count} members.`).catch(() => {});
+
+      await message.channel.send(
+        `📩 DMed ${count} members.`
+      );
+
       return;
     }
 
+    // -------------------------
     // ACTIVITY CHECK
+    // -------------------------
     if (cmd === 'activitycheck') {
-      const goal = Math.max(1, parseInt(args[0], 10) || 40);
+      const goal = Math.max(
+        1,
+        parseInt(args[0], 10) || 40
+      );
+
       const embed = new EmbedBuilder()
         .setColor(0x2b6cb0)
         .setTitle('📊 Activity Check')
-        .setDescription(`React with ✅ to check in!\nGoal: **${goal}** members.`);
-      const sent = await message.channel.send({ content: '@here', embeds: [embed] }).catch(() => null);
-      if (sent) await sent.react('✅').catch(() => {});
-      return;
-    }
+        .setDescription(
+          `React with ✅ to check in!\nGoal: **${goal}** members.`
+        );
 
-    // VOICE CONTROLS
-    if (cmd === 'joinvc') {
-      if (!ENABLE_VOICE) return message.reply('⚠️ Voice disabled on this host.').catch(() => {});
-      const vc = message.member.voice.channel;
-      if (!vc) return message.reply('Join a voice channel first.').catch(() => {});
-      joinVoiceChannel({ channelId: vc.id, guildId: vc.guild.id, adapterCreator: vc.guild.voiceAdapterCreator });
-      return message.channel.send('✅ Joined VC.').catch(() => {});
-    }
+      const sent =
+        await message.channel
+          .send({
+            content: '@here',
+            embeds: [embed],
+          })
+          .catch(() => null);
 
-    if (cmd === 'leavevc') {
-      const conn = getVoiceConnection(message.guild.id);
-      if (!conn) return message.reply('Not connected.').catch(() => {});
-      conn.destroy();
-      return message.channel.send('👋 Left VC.').catch(() => {});
-    }
-
-    if (cmd === 'play') {
-      if (!ENABLE_VOICE) return message.reply('⚠️ Voice disabled on this host.').catch(() => {});
-      const url = args[0];
-      if (!url || !ytdl.validateURL(url)) return message.reply('Usage: `!play <YouTubeURL>`').catch(() => {});
-      const vc = message.member.voice.channel;
-      if (!vc) return message.reply('Join a voice channel first.').catch(() => {});
-
-      const queue = musicQueues.get(message.guild.id) || [];
-      const info = await ytdl.getInfo(url).catch(() => null);
-      const title = info?.videoDetails?.title || url;
-      queue.push({ title, url });
-      musicQueues.set(message.guild.id, queue);
-      message.channel.send(`➕ Queued **${title}**`).catch(() => {});
-
-      let conn = getVoiceConnection(message.guild.id);
-      if (!conn) conn = joinVoiceChannel({ channelId: vc.id, guildId: vc.guild.id, adapterCreator: vc.guild.voiceAdapterCreator });
-
-      let player = audioPlayers.get(message.guild.id);
-      if (!player) {
-        player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
-        audioPlayers.set(message.guild.id, player);
-        conn.subscribe(player);
-
-        player.on(AudioPlayerStatus.Idle, async () => {
-          const cur = musicQueues.get(message.guild.id) || [];
-          cur.shift();
-          musicQueues.set(message.guild.id, cur);
-          if (cur[0]) {
-            await playTrack(message.guild.id, cur[0].url, message.channel);
-          } else {
-            message.channel.send('⏹️ Queue finished.').catch(() => {});
-          }
-        });
-
-        player.on('error', (e) => message.channel.send(`Player error: ${e.message}`).catch(() => {}));
+      if (sent) {
+        await sent.react('✅').catch(() => {});
       }
 
-      const curQ = musicQueues.get(message.guild.id) || [];
-      if (curQ.length === 1) await playTrack(message.guild.id, url, message.channel);
       return;
     }
 
+    // -------------------------
+    // JOIN VC
+    // -------------------------
+    if (cmd === 'joinvc') {
+      if (!ENABLE_VOICE) {
+        return message
+          .reply(
+            '⚠️ Voice disabled on this host.'
+          )
+          .catch(() => {});
+      }
+
+      const vc =
+        message.member.voice.channel;
+
+      if (!vc) {
+        return message
+          .reply(
+            'Join a voice channel first.'
+          )
+          .catch(() => {});
+      }
+
+      joinVoiceChannel({
+        channelId: vc.id,
+        guildId: vc.guild.id,
+        adapterCreator:
+          vc.guild.voiceAdapterCreator,
+      });
+
+      return message.channel
+        .send('✅ Joined VC.')
+        .catch(() => {});
+    }
+
+    // -------------------------
+    // LEAVE VC
+    // -------------------------
+    if (cmd === 'leavevc') {
+      const conn =
+        getVoiceConnection(
+          message.guild.id
+        );
+
+      if (!conn) {
+        return message
+          .reply('Not connected.')
+          .catch(() => {});
+      }
+
+      conn.destroy();
+
+      return message.channel
+        .send('👋 Left VC.')
+        .catch(() => {});
+    }
+
+    // -------------------------
+    // PLAY
+    // -------------------------
+    if (cmd === 'play') {
+      if (!ENABLE_VOICE) {
+        return message
+          .reply(
+            '⚠️ Voice disabled on this host.'
+          )
+          .catch(() => {});
+      }
+
+      const url = args[0];
+
+      if (
+        !url ||
+        !ytdl.validateURL(url)
+      ) {
+        return message
+          .reply(
+            'Usage: `!play <YouTubeURL>`'
+          )
+          .catch(() => {});
+      }
+
+      const vc =
+        message.member.voice.channel;
+
+      if (!vc) {
+        return message
+          .reply(
+            'Join a voice channel first.'
+          )
+          .catch(() => {});
+      }
+
+      const queue =
+        musicQueues.get(
+          message.guild.id
+        ) || [];
+
+      const info =
+        await ytdl
+          .getInfo(url)
+          .catch(() => null);
+
+      const title =
+        info?.videoDetails?.title || url;
+
+      queue.push({
+        title,
+        url,
+      });
+
+      musicQueues.set(
+        message.guild.id,
+        queue
+      );
+
+      await message.channel
+        .send(
+          `➕ Queued **${title}**`
+        )
+        .catch(() => {});
+
+      let conn =
+        getVoiceConnection(
+          message.guild.id
+        );
+
+      if (!conn) {
+        conn = joinVoiceChannel({
+          channelId: vc.id,
+          guildId: vc.guild.id,
+          adapterCreator:
+            vc.guild.voiceAdapterCreator,
+        });
+      }
+
+      let player =
+        audioPlayers.get(
+          message.guild.id
+        );
+
+      if (!player) {
+        player =
+          createAudioPlayer({
+            behaviors: {
+              noSubscriber:
+                NoSubscriberBehavior.Pause,
+            },
+          });
+
+        audioPlayers.set(
+          message.guild.id,
+          player
+        );
+
+        conn.subscribe(player);
+
+        player.on(
+          AudioPlayerStatus.Idle,
+          async () => {
+            const cur =
+              musicQueues.get(
+                message.guild.id
+              ) || [];
+
+            cur.shift();
+
+            musicQueues.set(
+              message.guild.id,
+              cur
+            );
+
+            if (cur[0]) {
+              await playTrack(
+                message.guild.id,
+                cur[0].url,
+                message.channel
+              );
+            } else {
+              await message.channel
+                .send(
+                  '⏹️ Queue finished.'
+                )
+                .catch(() => {});
+            }
+          }
+        );
+
+        player.on(
+          'error',
+          (e) => {
+            message.channel
+              .send(
+                `Player error: ${e.message}`
+              )
+              .catch(() => {});
+          }
+        );
+      }
+
+      const currentQueue =
+        musicQueues.get(
+          message.guild.id
+        ) || [];
+
+      if (currentQueue.length === 1) {
+        await playTrack(
+          message.guild.id,
+          url,
+          message.channel
+        );
+      }
+
+      return;
+    }
+
+    // -------------------------
+    // SKIP
+    // -------------------------
     if (cmd === 'skip') {
-      const player = audioPlayers.get(message.guild.id);
-      if (!player) return message.reply('Nothing playing.').catch(() => {});
+      const player =
+        audioPlayers.get(
+          message.guild.id
+        );
+
+      if (!player) {
+        return message
+          .reply('Nothing playing.')
+          .catch(() => {});
+      }
+
       player.stop(true);
-      return message.channel.send('⏭️ Skipped.').catch(() => {});
+
+      return message.channel
+        .send('⏭️ Skipped.')
+        .catch(() => {});
     }
 
+    // -------------------------
+    // STOP
+    // -------------------------
     if (cmd === 'stop') {
-      musicQueues.set(message.guild.id, []);
-      audioPlayers.get(message.guild.id)?.stop(true);
-      getVoiceConnection(message.guild.id)?.destroy();
-      return message.channel.send('⏹️ Stopped & cleared queue.').catch(() => {});
+      musicQueues.set(
+        message.guild.id,
+        []
+      );
+
+      audioPlayers
+        .get(message.guild.id)
+        ?.stop(true);
+
+      getVoiceConnection(
+        message.guild.id
+      )?.destroy();
+
+      return message.channel
+        .send(
+          '⏹️ Stopped & cleared queue.'
+        )
+        .catch(() => {});
     }
 
-    // HOSTFRIENDLY
+    // -------------------------
+    // HOST FRIENDLY
+    // -------------------------
     if (cmd === 'hostfriendly') {
-      if (!message.member.roles.cache.has(HOST_ROLE_ID)) return message.reply('❌ You are not allowed to host friendlies.').catch(() => {});
+      if (
+        !message.member.roles.cache.has(
+          HOST_ROLE_ID
+        )
+      ) {
+        return message
+          .reply(
+            '❌ You are not allowed to host friendlies.'
+          )
+          .catch(() => {});
+      }
 
-      hostfriendlyCounts.set(message.guild.id, (hostfriendlyCounts.get(message.guild.id) || 0) + 1);
+      hostfriendlyCounts.set(
+        message.guild.id,
+        (hostfriendlyCounts.get(
+          message.guild.id
+        ) || 0) + 1
+      );
 
-      const positions = ['GK', 'CB', 'CB2', 'CM', 'LW', 'RW', 'ST'];
-      const numbers = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣'];
-      const taken = Array(positions.length).fill(null);
+      const positions = [
+        'GK',
+        'CB',
+        'CB2',
+        'CM',
+        'LW',
+        'RW',
+        'ST',
+      ];
+
+      const numbers = [
+        '1️⃣',
+        '2️⃣',
+        '3️⃣',
+        '4️⃣',
+        '5️⃣',
+        '6️⃣',
+        '7️⃣',
+      ];
+
+      const taken = Array(
+        positions.length
+      ).fill(null);
+
       const lineup = {};
 
       if (args[0]) {
         let idx = -1;
-        const a = args[0].toLowerCase();
-        if (!Number.isNaN(Number(a))) idx = parseInt(a, 10) - 1;
-        else idx = positions.findIndex((p) => p.toLowerCase() === a);
-        if (idx >= 0 && idx < positions.length && !taken[idx]) {
-          taken[idx] = message.author.id;
-          lineup[message.author.id] = idx;
+
+        const a =
+          args[0].toLowerCase();
+
+        if (
+          !Number.isNaN(
+            Number(a)
+          )
+        ) {
+          idx =
+            parseInt(a, 10) - 1;
+        } else {
+          idx =
+            positions.findIndex(
+              (p) =>
+                p.toLowerCase() === a
+            );
+        }
+
+        if (
+          idx >= 0 &&
+          idx < positions.length &&
+          !taken[idx]
+        ) {
+          taken[idx] =
+            message.author.id;
+
+          lineup[
+            message.author.id
+          ] = idx;
         }
       }
 
-      const sent = await message.channel.send({ content: '@here', embeds: [lineupEmbed({ positions, numbers, taken, lineup })] }).catch(() => null);
-      if (!sent) return message.reply('Failed to post lineup.').catch(() => {});
+      const sent =
+        await message.channel
+          .send({
+            content: '@here',
+            embeds: [
+              lineupEmbed({
+                positions,
+                numbers,
+                taken,
+                lineup,
+              }),
+            ],
+          })
+          .catch(() => null);
 
-      for (const e of numbers) await sent.react(e).catch(() => {});
+      if (!sent) {
+        return message
+          .reply(
+            'Failed to post lineup.'
+          )
+          .catch(() => {});
+      }
 
-      const state = { messageId: sent.id, channelId: sent.channel.id, positions, numbers, taken, lineup };
-      lineups.set(message.guild.id, state);
+      for (const emoji of numbers) {
+        await sent.react(emoji).catch(() => {});
+      }
 
-      const collector = sent.createReactionCollector({
-        filter: (r, u) => numbers.includes(r.emoji.name) && !u.bot,
-        time: 30 * 60 * 1000,
-      });
+      const state = {
+        messageId: sent.id,
+        channelId: sent.channel.id,
+        positions,
+        numbers,
+        taken,
+        lineup,
+      };
 
-      collector.on('collect', async (reaction, user) => {
-        try {
-          const current = lineups.get(message.guild.id);
-          if (!current) return;
+      lineups.set(
+        message.guild.id,
+        state
+      );
 
-          const posIndex = current.numbers.indexOf(reaction.emoji.name);
-          if (current.lineup[user.id] !== undefined) {
-            reaction.users.remove(user.id).catch(() => {});
-            return message.channel.send(`<@${user.id}> ❌ You are already in the lineup!`).catch(() => {});
+      const collector =
+        sent.createReactionCollector({
+          filter: (reaction, user) =>
+            numbers.includes(
+              reaction.emoji.name
+            ) && !user.bot,
+
+          time: 30 * 60 * 1000,
+        });
+
+      collector.on(
+        'collect',
+        async (reaction, user) => {
+          try {
+            const current =
+              lineups.get(
+                message.guild.id
+              );
+
+            if (!current) return;
+
+            const posIndex =
+              current.numbers.indexOf(
+                reaction.emoji.name
+              );
+
+            if (
+              current.lineup[user.id] !==
+              undefined
+            ) {
+              reaction.users
+                .remove(user.id)
+                .catch(() => {});
+
+              await message.channel
+                .send(
+                  `<@${user.id}> ❌ You are already in the lineup!`
+                )
+                .catch(() => {});
+
+              return;
+            }
+
+            if (
+              current.taken[posIndex]
+            ) {
+              reaction.users
+                .remove(user.id)
+                .catch(() => {});
+
+              await message.channel
+                .send(
+                  `<@${user.id}> ❌ Position taken.`
+                )
+                .catch(() => {});
+
+              return;
+            }
+
+            current.taken[posIndex] =
+              user.id;
+
+            current.lineup[user.id] =
+              posIndex;
+
+            await user
+              .send(
+                `✅ Position confirmed: **${current.positions[posIndex]}**`
+              )
+              .catch(() => {});
+
+            await message.channel
+              .send(
+                `✅ ${current.positions[posIndex]} confirmed for <@${user.id}>`
+              )
+              .catch(() => {});
+
+            const channel =
+              await message.guild.channels
+                .fetch(
+                  current.channelId
+                )
+                .catch(() => null);
+
+            if (!channel) return;
+
+            const msgToEdit =
+              await channel.messages
+                .fetch(
+                  current.messageId
+                )
+                .catch(() => null);
+
+            if (!msgToEdit) return;
+
+            await msgToEdit
+              .edit({
+                embeds: [
+                  lineupEmbed(current),
+                ],
+              })
+              .catch(() => {});
+          } catch (e) {
+            console.error(
+              'Lineup reaction handling error:',
+              e
+            );
           }
-          if (current.taken[posIndex]) {
-            reaction.users.remove(user.id).catch(() => {});
-            return message.channel.send(`<@${user.id}> ❌ Position taken.`).catch(() => {});
-          }
-
-          current.taken[posIndex] = user.id;
-          current.lineup[user.id] = posIndex;
-          await user.send(`✅ Position confirmed: **${current.positions[posIndex]}**`).catch(() => {});
-          message.channel.send(`✅ ${current.positions[posIndex]} confirmed for <@${user.id}>`).catch(() => {});
-
-          const channel = await message.guild.channels.fetch(current.channelId).catch(() => null);
-          if (!channel) return;
-          const msgToEdit = await channel.messages.fetch(current.messageId).catch(() => null);
-          if (!msgToEdit) return;
-          await msgToEdit.edit({ embeds: [lineupEmbed(current)] }).catch(() => {});
-        } catch (e) {
-          console.error('Lineup reaction handling error:', e);
         }
-      });
+      );
 
       return;
     }
 
+    // -------------------------
+    // EDIT LINEUP
+    // -------------------------
     if (cmd === 'editlineup') {
-      if (!message.member.roles.cache.has(HOST_ROLE_ID)) return message.reply('Only host can edit lineup.').catch(() => {});
-      const state = lineups.get(message.guild.id);
-      if (!state) return message.reply('No active lineup.').catch(() => {});
+      if (
+        !message.member.roles.cache.has(
+          HOST_ROLE_ID
+        )
+      ) {
+        return message
+          .reply(
+            'Only the friendly host can edit the lineup.'
+          )
+          .catch(() => {});
+      }
 
-      const posArg = args[0]?.toLowerCase();
-      const user = message.mentions.users.first();
-      if (!posArg || !user) return message.reply('Usage: `!editlineup <pos> @user`').catch(() => {});
+      const state =
+        lineups.get(
+          message.guild.id
+        );
+
+      if (!state) {
+        return message
+          .reply(
+            'No active lineup.'
+          )
+          .catch(() => {});
+      }
+
+      const posArg =
+        args[0]?.toLowerCase();
+
+      const user =
+        message.mentions.users.first();
+
+      if (!posArg || !user) {
+        return message
+          .reply(
+            'Usage: `!editlineup <pos> @user`'
+          )
+          .catch(() => {});
+      }
 
       let idx = -1;
-      if (!Number.isNaN(Number(posArg))) idx = parseInt(posArg, 10) - 1;
-      else idx = state.positions.findIndex((p) => p.toLowerCase() === posArg);
-      if (idx < 0 || idx >= state.positions.length) return message.reply('Invalid position.').catch(() => {});
+
+      if (
+        !Number.isNaN(
+          Number(posArg)
+        )
+      ) {
+        idx =
+          parseInt(
+            posArg,
+            10
+          ) - 1;
+      } else {
+        idx =
+          state.positions.findIndex(
+            (p) =>
+              p.toLowerCase() ===
+              posArg
+          );
+      }
+
+      if (
+        idx < 0 ||
+        idx >= state.positions.length
+      ) {
+        return message
+          .reply(
+            'Invalid position.'
+          )
+          .catch(() => {});
+      }
 
       if (state.taken[idx]) {
-        const prev = state.taken[idx];
-        delete state.lineup[prev];
+        const previous =
+          state.taken[idx];
+
+        delete state.lineup[
+          previous
+        ];
       }
-      if (state.lineup[user.id] !== undefined) {
-        const old = state.lineup[user.id];
+
+      if (
+        state.lineup[user.id] !==
+        undefined
+      ) {
+        const old =
+          state.lineup[user.id];
+
         state.taken[old] = null;
       }
 
-      state.taken[idx] = user.id;
-      state.lineup[user.id] = idx;
+      state.taken[idx] =
+        user.id;
 
-      const channel = await message.guild.channels.fetch(state.channelId).catch(() => null);
-      if (!channel) return message.reply('Failed to fetch lineup channel.').catch(() => {});
-      const msgToEdit = await channel.messages.fetch(state.messageId).catch(() => null);
-      if (!msgToEdit) return message.reply('Failed to fetch lineup message.').catch(() => {});
+      state.lineup[user.id] =
+        idx;
 
-      await msgToEdit.edit({ embeds: [lineupEmbed(state)] }).catch(() => {});
-      return message.channel.send(`✏️ ${state.positions[idx]} updated → <@${user.id}>`).catch(() => {});
-    }
+      const channel =
+        await message.guild.channels
+          .fetch(state.channelId)
+          .catch(() => null);
 
-    if (cmd === 'resetlineup') {
-      if (!message.member.roles.cache.has(HOST_ROLE_ID)) return message.reply('Only host can reset.').catch(() => {});
-      lineups.delete(message.guild.id);
-      return message.channel.send('♻️ Lineup reset.').catch(() => {});
-    }
-
-    // HOSTTRAINING
-    if (cmd === 'hosttraining') {
-      if (!message.member.roles.cache.has(HOST_ROLE_ID) && !message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return message.reply('❌ You are not allowed to host trainings.').catch(() => {});
+      if (!channel) {
+        return message
+          .reply(
+            'Failed to fetch lineup channel.'
+          )
+          .catch(() => {});
       }
 
-      await message.reply('✅ Send the training link below. You have 60 seconds.').catch(() => {});
-      const filter = (m) => m.author.id === message.author.id;
-      const collector = message.channel.createMessageCollector({ filter, max: 1, time: 60000 });
+      const msgToEdit =
+        await channel.messages
+          .fetch(state.messageId)
+          .catch(() => null);
 
-      collector.on('collect', async (collected) => {
-        const link = collected.content.trim();
-        if (!link.startsWith('http')) {
-          return message.reply('❌ That is not a valid link. Training cancelled.').catch(() => {});
-        }
+      if (!msgToEdit) {
+        return message
+          .reply(
+            'Failed to fetch lineup message.'
+          )
+          .catch(() => {});
+      }
 
-        const embed = new EmbedBuilder()
-          .setColor('Blue')
-          .setTitle('📘 Training Signup')
-          .setDescription(`React ✅ to receive the training link.\nHosted by <@${message.author.id}>`)
-          .setTimestamp();
+      await msgToEdit
+        .edit({
+          embeds: [
+            lineupEmbed(state),
+          ],
+        })
+        .catch(() => {});
 
-        const signupMsg = await message.channel.send({ embeds: [embed] }).catch(() => null);
-        if (!signupMsg) return message.reply('Failed to post signup.').catch(() => {});
+      return message.channel
+        .send(
+          `✏️ ${state.positions[idx]} updated → <@${user.id}>`
+        )
+        .catch(() => {});
+    }
 
-        await signupMsg.react('✅').catch(() => {});
+    // -------------------------
+    // RESET LINEUP
+    // -------------------------
+    if (cmd === 'resetlineup') {
+      if (
+        !message.member.roles.cache.has(
+          HOST_ROLE_ID
+        )
+      ) {
+        return message
+          .reply(
+            'Only the friendly host can reset.'
+          )
+          .catch(() => {});
+      }
 
-        const rFilter = (reaction, user) => reaction.emoji.name === '✅' && !user.bot;
-        const rCollector = signupMsg.createReactionCollector({ filter: rFilter });
+      lineups.delete(
+        message.guild.id
+      );
 
-        rCollector.on('collect', async (reaction, user) => {
-          try {
-            await user.send(`✅ Here is the training link:\n${link}`).catch(async () => {
-              await message.channel.send(`⚠️ <@${user.id}> has DMs closed. Could not send link.`).catch(() => {});
-            });
-          } catch {
-            // ignore
-          }
+      return message.channel
+        .send(
+          '♻️ Lineup reset.'
+        )
+        .catch(() => {});
+    }
+
+    // -------------------------
+    // HOST TRAINING
+    // -------------------------
+    if (cmd === 'hosttraining') {
+      if (
+        !message.member.roles.cache.has(
+          HOST_ROLE_ID
+        ) &&
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.Administrator
+        )
+      ) {
+        return message
+          .reply(
+            '❌ You are not allowed to host trainings.'
+          )
+          .catch(() => {});
+      }
+
+      await message
+        .reply(
+          '✅ Send the training link below. You have 60 seconds.'
+        )
+        .catch(() => {});
+
+      const filter = (m) =>
+        m.author.id ===
+        message.author.id;
+
+      const collector =
+        message.channel.createMessageCollector({
+          filter,
+          max: 1,
+          time: 60_000,
         });
-      });
 
-      collector.on('end', (collected) => {
-        if (collected.size === 0) {
-          message.reply('❌ You never sent a link. Training cancelled.').catch(() => {});
+      collector.on(
+        'collect',
+        async (collected) => {
+          const link =
+            collected.content.trim();
+
+          if (
+            !link.startsWith(
+              'http'
+            )
+          ) {
+            await message
+              .reply(
+                '❌ That is not a valid link. Training cancelled.'
+              )
+              .catch(() => {});
+
+            return;
+          }
+
+          const embed =
+            new EmbedBuilder()
+              .setColor('Blue')
+              .setTitle(
+                '📘 erts United Training Signup'
+              )
+              .setDescription(
+                `React ✅ to receive the training link.\nHosted by <@${message.author.id}>`
+              )
+              .setTimestamp();
+
+          const signupMsg =
+            await message.channel
+              .send({
+                embeds: [embed],
+              })
+              .catch(() => null);
+
+          if (!signupMsg) {
+            return message
+              .reply(
+                'Failed to post signup.'
+              )
+              .catch(() => {});
+          }
+
+          await signupMsg
+            .react('✅')
+            .catch(() => {});
+
+          const reactionFilter = (
+            reaction,
+            user
+          ) =>
+            reaction.emoji.name ===
+              '✅' &&
+            !user.bot;
+
+          const reactionCollector =
+            signupMsg.createReactionCollector({
+              filter: reactionFilter,
+            });
+
+          reactionCollector.on(
+            'collect',
+            async (_reaction, user) => {
+              try {
+                await user
+                  .send(
+                    `✅ Here is the training link:\n${link}`
+                  )
+                  .catch(async () => {
+                    await message.channel
+                      .send(
+                        `⚠️ <@${user.id}> has DMs closed. Could not send link.`
+                      )
+                      .catch(() => {});
+                  });
+              } catch {
+                // Ignore
+              }
+            }
+          );
         }
-      });
+      );
+
+      collector.on(
+        'end',
+        (collected) => {
+          if (collected.size === 0) {
+            message
+              .reply(
+                '❌ You never sent a link. Training cancelled.'
+              )
+              .catch(() => {});
+          }
+        }
+      );
 
       return;
     }
 
+    // -------------------------
     // MESSAGE ANNOUNCEMENT
+    // -------------------------
     if (cmd === 'message') {
-      const content = args.join(' ');
-      if (!content) return message.reply('❌ You need to actually write something.').catch(() => {});
-      const embed = new EmbedBuilder()
-        .setColor('Blue')
-        .setTitle('📢 Announcement')
-        .setDescription(content)
-        .setFooter({ text: `Sent by ${message.author.tag}` })
-        .setTimestamp();
-      return message.channel.send({ embeds: [embed] }).catch(() => {});
+      if (
+        !message.member.permissions.has(
+          PermissionsBitField.Flags.ManageMessages
+        )
+      ) {
+        return message
+          .reply(
+            '❌ You need Manage Messages permission to use this command.'
+          )
+          .catch(() => {});
+      }
+
+      const content =
+        args.join(' ');
+
+      if (!content) {
+        return message
+          .reply(
+            '❌ You need to actually write something.'
+          )
+          .catch(() => {});
+      }
+
+      const embed =
+        new EmbedBuilder()
+          .setColor('Blue')
+          .setTitle(
+            '📢 erts United Announcement'
+          )
+          .setDescription(content)
+          .setFooter({
+            text: `Sent by ${message.author.tag}`,
+          })
+          .setTimestamp();
+
+      return message.channel
+        .send({
+          embeds: [embed],
+        })
+        .catch(() => {});
     }
 
-    // CHECKFRIENDLY
+    // -------------------------
+    // CHECK FRIENDLY
+    // -------------------------
     if (cmd === 'checkfriendly') {
-      const count = hostfriendlyCounts.get(message.guild.id) || 0;
-      return message.channel.send(`📋 This server has used \`!hostfriendly\` **${count}** time(s).`).catch(() => {});
+      const count =
+        hostfriendlyCounts.get(
+          message.guild.id
+        ) || 0;
+
+      return message.channel
+        .send(
+          `📋 This server has used \`!hostfriendly\` **${count}** time(s).`
+        )
+        .catch(() => {});
     }
 
-    // ECONOMY / GAMBLING
-    ensureUser(message.author.id);
-
-    if (cmd === 'start') {
-      return message.reply(`You have ${getBal(message.author.id)} Robux (new users start with 10).`).catch(() => {});
-    }
-
-    if (cmd === 'bal' || cmd === 'balance') {
-      return message.reply(`${message.author}, your balance: **${getBal(message.author.id)} Robux**`).catch(() => {});
-    }
-
-    if (cmd === 'give') {
-      const target = message.mentions.users.first();
-      const amtArg = args[1] || args[0];
-      const amt = parseInt(amtArg, 10);
-      if (!target || Number.isNaN(amt) || amt <= 0) return message.reply('Usage: `!give @user <amount>`').catch(() => {});
-      if (getBal(message.author.id) < amt) return message.reply('Insufficient funds.').catch(() => {});
-      subBal(message.author.id, amt);
-      addBal(target.id, amt);
-      return message.reply(`✅ Sent ${amt} Robux to ${target.tag}. New balance: ${getBal(message.author.id)} Robux`).catch(() => {});
-    }
-
-    if (cmd === 'spin') {
-      const key = `${message.author.id}:spin`;
-      if (!cooldownReady(key, 2500)) return message.reply('Slow down. Try again in a moment.').catch(() => {});
-      const bet = parseBet(args[0], getBal(message.author.id));
-      if (!bet) return message.reply('Usage: `!spin <amount|all|<percent>%>`').catch(() => {});
-      if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.').catch(() => {});
-      subBal(message.author.id, bet);
-      const win = spinWheel(bet);
-      if (win > 0) {
-        addBal(message.author.id, win);
-        return message.reply(`🎡 You spun and won **${win} Robux**! New balance: ${getBal(message.author.id)}`).catch(() => {});
-      }
-      return message.reply(`🎡 Bad luck — you lost ${bet} Robux. New balance: ${getBal(message.author.id)}`).catch(() => {});
-    }
-
-    if (cmd === 'coin') {
-      const key = `${message.author.id}:coin`;
-      if (!cooldownReady(key, 2500)) return message.reply('Slow down. Try again in a moment.').catch(() => {});
-      const bet = parseBet(args[0], getBal(message.author.id));
-      if (!bet) return message.reply('Usage: `!coin <amount|all|<percent>%>`').catch(() => {});
-      if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.').catch(() => {});
-      const res = coinFlip(bet);
-      if (res > 0) {
-        addBal(message.author.id, res);
-        return message.reply(`🪙 You won ${res} Robux! New balance: ${getBal(message.author.id)}`).catch(() => {});
-      }
-      subBal(message.author.id, bet);
-      return message.reply(`🪙 You lost ${bet} Robux. New balance: ${getBal(message.author.id)}`).catch(() => {});
-    }
-
-    if (cmd === 'slots') {
-      const key = `${message.author.id}:slots`;
-      if (!cooldownReady(key, 2500)) return message.reply('Slow down. Try again in a moment.').catch(() => {});
-      const bet = parseBet(args[0], getBal(message.author.id));
-      if (!bet) return message.reply('Usage: `!slots <amount|all|<percent>%>`').catch(() => {});
-      if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.').catch(() => {});
-      subBal(message.author.id, bet);
-      const { display, payout } = slotsResult(bet);
-      if (payout > 0) addBal(message.author.id, payout);
-      return message.reply(
-        `🎰 ${display}\n${payout > 0 ? `You won ${payout} Robux!` : `You lost ${bet} Robux.`}\nNew balance: ${getBal(message.author.id)}`
-      ).catch(() => {});
-    }
-
-    if (cmd === 'blackjack' || cmd === 'bj') {
-      const key = `${message.author.id}:blackjack`;
-      if (!cooldownReady(key, 2500)) return message.reply('Slow down. Try again in a moment.').catch(() => {});
-      const bet = parseBet(args[0], getBal(message.author.id));
-      if (!bet) return message.reply('Usage: `!blackjack <amount|all|<percent>%>`').catch(() => {});
-      if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.').catch(() => {});
-      subBal(message.author.id, bet);
-      const res = blackjackResolve(bet);
-      if (res.payout > 0) addBal(message.author.id, res.payout);
-      const ph = formatHand(res.player);
-      const dh = formatHand(res.dealer);
-      const resultText = res.result === 'push' ? 'Push — bet returned.' : res.payout > 0 ? `You win ${res.payout} Robux!` : `You lose ${-res.payout} Robux.`;
-      return message.reply(`🃏 Blackjack\nYour hand: ${ph} (${res.pv})\nDealer: ${dh} (${res.dv})\n${resultText}\nNew balance: ${getBal(message.author.id)}`).catch(() => {});
-    }
-
-    if (cmd === 'poker') {
-      const key = `${message.author.id}:poker`;
-      if (!cooldownReady(key, 2500)) return message.reply('Slow down. Try again in a moment.').catch(() => {});
-      const bet = parseBet(args[0], getBal(message.author.id));
-      if (!bet) return message.reply('Usage: `!poker <amount|all|<percent>%>`').catch(() => {});
-      if (getBal(message.author.id) < bet) return message.reply('Insufficient funds.').catch(() => {});
-      subBal(message.author.id, bet);
-      const res = pokerResolve(bet);
-      if (res.payout > 0) addBal(message.author.id, res.payout);
-      const ph = res.player.map((c) => `${c.r}${c.s}`).join(' ');
-      const dh = res.dealer.map((c) => `${c.r}${c.s}`).join(' ');
-      const outcome = res.payout > 0 ? `You won ${res.payout} Robux!` : res.payout < 0 ? `You lost ${-res.payout} Robux.` : 'Push.';
-      return message.reply(`🂡 Poker (5-card)\nYour hand: ${ph} — ${res.pr.name}\nDealer: ${dh} — ${res.dr.name}\n${outcome}\nNew balance: ${getBal(message.author.id)}`).catch(() => {});
-    }
-
-    if (cmd === 'crime') {
-      const key = `${message.author.id}:crime`;
-      if (!cooldownReady(key, 2500)) return message.reply('Slow down. Try again in a moment.').catch(() => {});
-      const result = crimeAttempt();
-      if (result.success) {
-        addBal(message.author.id, result.amount);
-        safeGetLogChannel(message.guild)?.send(`🕵️‍♂️ Crime success: ${message.author.tag} got ${result.amount}`).catch(() => {});
-        return message.reply(`💰 Crime succeeded! You stole **${result.amount} Robux**. New balance: ${getBal(message.author.id)}`).catch(() => {});
-      }
-      const loss = Math.min(getBal(message.author.id), result.fine);
-      subBal(message.author.id, loss);
-      safeGetLogChannel(message.guild)?.send(`🚔 Crime failed: ${message.author.tag} fined ${loss}`).catch(() => {});
-      return message.reply(`🚨 You got caught! You paid **${loss} Robux** in fines. New balance: ${getBal(message.author.id)}`).catch(() => {});
-    }
-
-    // unknown commands are ignored
+    // -------------------------
+    // Unknown commands ignored
+    // -------------------------
   } catch (err) {
-    console.error('messageCreate handler error:', err);
+    console.error(
+      'messageCreate handler error:',
+      err
+    );
   }
 });
 
 // -----------------------------
 // Music helper
 // -----------------------------
-async function playTrack(guildId, url, textChannel) {
+async function playTrack(
+  guildId,
+  url,
+  textChannel
+) {
   try {
-    const conn = getVoiceConnection(guildId);
+    const conn =
+      getVoiceConnection(guildId);
+
     if (!conn) {
-      await textChannel.send('⚠️ Not connected to a VC.').catch(() => {});
+      await textChannel
+        .send(
+          '⚠️ Not connected to a VC.'
+        )
+        .catch(() => {});
+
       return;
     }
 
@@ -992,20 +1796,55 @@ async function playTrack(guildId, url, textChannel) {
       quality: 'highestaudio',
     });
 
-    const resource = createAudioResource(stream);
-    let player = audioPlayers.get(guildId);
+    const resource =
+      createAudioResource(stream);
+
+    let player =
+      audioPlayers.get(guildId);
+
     if (!player) {
-      player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
-      audioPlayers.set(guildId, player);
+      player =
+        createAudioPlayer({
+          behaviors: {
+            noSubscriber:
+              NoSubscriberBehavior.Pause,
+          },
+        });
+
+      audioPlayers.set(
+        guildId,
+        player
+      );
+
       conn.subscribe(player);
     }
 
     player.play(resource);
-    const info = await ytdl.getInfo(url).catch(() => null);
-    await textChannel.send(`🎶 Playing **${info?.videoDetails?.title || url}**`).catch(() => {});
+
+    const info =
+      await ytdl
+        .getInfo(url)
+        .catch(() => null);
+
+    await textChannel
+      .send(
+        `🎶 Playing **${
+          info?.videoDetails?.title ||
+          url
+        }**`
+      )
+      .catch(() => {});
   } catch (e) {
-    console.error('playTrack error:', e);
-    await textChannel.send(`Failed to play track: ${e.message}`).catch(() => {});
+    console.error(
+      'playTrack error:',
+      e
+    );
+
+    await textChannel
+      .send(
+        `Failed to play track: ${e.message}`
+      )
+      .catch(() => {});
   }
 }
 
@@ -1013,29 +1852,64 @@ async function playTrack(guildId, url, textChannel) {
 // Keepalive server
 // -----------------------------
 const app = express();
-app.get('/', (_req, res) => res.send('✅ Ertern FC Bot is alive and running!'));
-app.listen(PORT, '0.0.0.0', () => console.log(`🌍 Keepalive server listening on http://0.0.0.0:${PORT}`));
+
+app.get('/', (_req, res) => {
+  res.send(
+    '✅ erts United Bot is alive and running!'
+  );
+});
+
+app.listen(
+  PORT,
+  '0.0.0.0',
+  () => {
+    console.log(
+      `🌍 Keepalive server listening on port ${PORT}`
+    );
+  }
+);
 
 // -----------------------------
 // Process safety
 // -----------------------------
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection:', reason);
-});
+process.on(
+  'unhandledRejection',
+  (reason) => {
+    console.error(
+      'Unhandled Rejection:',
+      reason
+    );
+  }
+);
 
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-});
+process.on(
+  'uncaughtException',
+  (err) => {
+    console.error(
+      'Uncaught Exception:',
+      err
+    );
+  }
+);
 
 // -----------------------------
 // Login
 // -----------------------------
 if (!TOKEN) {
-  console.error('❌ Missing TOKEN env var. Set TOKEN in environment.');
+  console.error(
+    '❌ Missing TOKEN env var. Set TOKEN in environment.'
+  );
+
   process.exit(1);
 }
 
-client.login(TOKEN).catch((e) => {
-  console.error('Failed to login:', e);
-  process.exit(1);
-});
+client
+  .login(TOKEN)
+  .catch((e) => {
+    console.error(
+      'Failed to login:',
+      e
+    );
+
+    process.exit(1);
+  });
