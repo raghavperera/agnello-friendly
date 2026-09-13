@@ -68,8 +68,7 @@ const openai = OPENAI_API_KEY
   : null;
 
 // AI model
-const AI_MODEL =
-  process.env.AI_MODEL || 'gpt-5.5';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-5.6-luna';
 
 // ======================================================
 // STATE
