@@ -1,6 +1,7 @@
 {
-  "name": "ertern-fc-bot",
+  "name": "erts-united-bot",
   "version": "1.0.0",
+  "description": "erts United Discord Bot",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -12,7 +13,6 @@
     "discord.js": "^14.25.1",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
-    "openai": "^7.15.0",
-    "ytdl-core": "^4.11.5"
+    "play-dl": "^1.9.7"
   }
 }
