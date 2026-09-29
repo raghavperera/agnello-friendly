@@ -1,19 +1,22 @@
 {
   "name": "erts-united-bot",
-  "version": "1.0.0",
-  "description": "erts United Discord Bot",
+  "version": "3.0.0",
+  "description": "erts United Discord bot",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
-    "@discordjs/voice": "^0.16.1",
-    "discord.js": "^14.25.1",
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.27.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
-    "openai": "^7.15.0",
+    "openai": "^7.17.0",
     "play-dl": "^1.9.7"
   }
 }
