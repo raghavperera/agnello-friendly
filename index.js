@@ -1,38 +1,90 @@
 import "dotenv/config";
 import express from "express";
 import {
-  Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder,
-  ButtonStyle, EmbedBuilder, ChannelType, PermissionsBitField,
+  Client,
+  GatewayIntentBits,
+  Partials,
+  EmbedBuilder,
+  ChannelType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  PermissionsBitField,
 } from "discord.js";
+
 import {
-  joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus,
-  VoiceConnectionStatus, NoSubscriberBehavior, entersState,
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  NoSubscriberBehavior,
+  entersState,
 } from "@discordjs/voice";
+
 import play from "play-dl";
 import OpenAI from "openai";
 
-const TOKEN = process.env.TOKEN || process.env.DISCORD_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
+// ============================================================
+// CONFIG
+// ============================================================
+
+const TOKEN =
+  process.env.TOKEN ||
+  process.env.DISCORD_TOKEN;
+
+const OPENAI_API_KEY =
+  process.env.OPENAI_API_KEY || "";
+
+const OPENAI_MODEL =
+  process.env.OPENAI_MODEL ||
+  "gpt-5-mini";
 
 const PREFIX = "!";
-const GUILD_ID = process.env.GUILD_ID || "1540116399558313995";
-const HOSTER_ROLE = process.env.FRIENDLY_HOSTER_ROLE_ID || "1541193960041615361";
-const RESULTS_CHANNEL = process.env.RESULTS_CHANNEL_ID || "1540136949908770827";
-const LOG_CHANNEL = process.env.LOG_CHANNEL_ID || "1362214241091981452";
-const FIXED_VC = process.env.FIXED_VC_ID || "1368359914145058956";
-const INVITE = process.env.INVITE_LINK || "https://discord.gg/ZrNuUKJFfS";
-const PORT = Number(process.env.PORT || 10000);
+
+// YOUR ERts UNITED SERVER
+const GUILD_ID =
+  "1540116399558313995";
+
+const FRIENDLY_HOSTER_ROLE_ID =
+  "1541193960041615361";
+
+const RESULTS_CHANNEL_ID =
+  "1540136949908770827";
+
+const LOG_CHANNEL_ID =
+  "1362214241091981452";
+
+const FIXED_VC_ID =
+  "1368359914145058956";
+
+const INVITE_LINK =
+  process.env.INVITE_LINK ||
+  "https://discord.gg/ZrNuUKJFfS";
+
+const PORT =
+  Number(process.env.PORT) ||
+  10000;
+
+// ============================================================
+// CHECK TOKEN
+// ============================================================
 
 if (!TOKEN) {
   console.error("❌ TOKEN is missing.");
   process.exit(1);
 }
 
+// ============================================================
+// WEB SERVER FOR RENDER
+// ============================================================
+
 const app = express();
 
 app.get("/", (_req, res) => {
-  res.status(200).send("erts United Bot is online.");
+  res.status(200).send(
+    "erts United Bot is online."
+  );
 });
 
 app.get("/health", (_req, res) => {
@@ -44,8 +96,14 @@ app.get("/health", (_req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 Web server on ${PORT}`);
+  console.log(
+    `🌐 Web server running on port ${PORT}`
+  );
 });
+
+// ============================================================
+// DISCORD CLIENT
+// ============================================================
 
 const client = new Client({
   intents: [
@@ -56,11 +114,16 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.DirectMessages,
   ],
-  partials: [Partials.Channel],
+
+  partials: [
+    Partials.Channel,
+  ],
 });
 
 const openai = OPENAI_API_KEY
-  ? new OpenAI({ apiKey: OPENAI_API_KEY })
+  ? new OpenAI({
+      apiKey: OPENAI_API_KEY,
+    })
   : null;
 
 // ============================================================
@@ -77,18 +140,53 @@ const POSITIONS = [
   ["ST", "ST", "friendly_ST"],
 ];
 
-const NEED_ADD = "friendly_need_add";
+const NEED_ADD_BUTTON =
+  "friendly_need_add";
 
-const friendlies = new Map();
-const completed = new Map();
-const locks = new Map();
-const pendingDMs = new Map();
+const activeFriendlies =
+  new Map();
 
-const DM_TIMEOUT = 10 * 60 * 1000;
+const completedFriendlies =
+  new Map();
+
+const pendingRobloxDMs =
+  new Map();
+
+const friendlyLocks =
+  new Map();
+
+const ROBLOX_DM_TIMEOUT =
+  10 * 60 * 1000;
 
 // ============================================================
-// BASIC HELPERS
+// MUSIC
 // ============================================================
+
+const musicQueues =
+  new Map();
+
+// ============================================================
+// GENERAL HELPERS
+// ============================================================
+
+function isCorrectGuild(message) {
+  return (
+    message.guildId ===
+    GUILD_ID
+  );
+}
+
+function isFriendlyHoster(message) {
+  return Boolean(
+    message.member?.roles?.cache?.has(
+      FRIENDLY_HOSTER_ROLE_ID
+    )
+  );
+}
+
+function mentionUser(userId) {
+  return `<@${userId}>`;
+}
 
 function emptyLineup() {
   return {
@@ -102,559 +200,28 @@ function emptyLineup() {
   };
 }
 
-function filled(lineup) {
-  return Object.values(lineup).filter(Boolean).length;
+function lineupCount(lineup) {
+  return Object.values(
+    lineup
+  ).filter(Boolean).length;
 }
 
-function complete(lineup) {
-  return filled(lineup) === 7;
-}
-
-function mention(id) {
-  return `<@${id}>`;
-}
-
-function isHoster(message) {
-  return message.member?.roles?.cache?.has(HOSTER_ROLE) === true;
-}
-
-function noMentions(content) {
-  return {
-    content,
-    allowedMentions: {
-      parse: [],
-    },
-  };
-}
-
-function lock(channelId, fn) {
-  const previous = locks.get(channelId) || Promise.resolve();
-
-  const next = previous
-    .catch(() => {})
-    .then(fn)
-    .finally(() => {
-      if (locks.get(channelId) === next) {
-        locks.delete(channelId);
-      }
-    });
-
-  locks.set(channelId, next);
-  return next;
-}
-
-async function getMember(guild, id) {
-  try {
-    return await guild.members.fetch(id);
-  } catch {
-    return null;
-  }
-}
-
-async function sendLog(text) {
-  try {
-    const channel = await client.channels.fetch(LOG_CHANNEL);
-
-    if (channel?.isTextBased()) {
-      await channel.send(noMentions(text));
-    }
-  } catch (error) {
-    console.error("❌ Log error:", error?.message || error);
-  }
-}
-
-// ============================================================
-// FRIENDLY MESSAGE
-// ============================================================
-
-function needAddText(state) {
-  if (!state.needs.length) {
-    return "None";
-  }
-
-  return state.needs
-    .map(
-      (entry) =>
-        `• **${entry.discordName}** → Roblox: **${entry.roblox}**`
-    )
-    .join("\n");
-}
-
-function buildFriendlyButtons(state) {
-  const rows = [];
-
-  const firstRow = new ActionRowBuilder().addComponents(
-    ...POSITIONS.slice(0, 4).map(([key, label, customId]) => {
-      const taken = Boolean(state.lineup[key]);
-
-      return new ButtonBuilder()
-        .setCustomId(customId)
-        .setLabel(taken ? `${label} ✓` : label)
-        .setStyle(taken ? ButtonStyle.Success : ButtonStyle.Primary)
-        .setDisabled(taken || complete(state.lineup));
-    })
+function lineupComplete(lineup) {
+  return (
+    lineupCount(lineup) === 7
   );
-
-  const secondRow = new ActionRowBuilder().addComponents(
-    ...POSITIONS.slice(4).map(([key, label, customId]) => {
-      const taken = Boolean(state.lineup[key]);
-
-      return new ButtonBuilder()
-        .setCustomId(customId)
-        .setLabel(taken ? `${label} ✓` : label)
-        .setStyle(taken ? ButtonStyle.Success : ButtonStyle.Primary)
-        .setDisabled(taken || complete(state.lineup));
-    })
-  );
-
-  const thirdRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(NEED_ADD)
-      .setLabel("➕ Need Add")
-      .setStyle(ButtonStyle.Secondary)
-  );
-
-  rows.push(firstRow);
-  rows.push(secondRow);
-  rows.push(thirdRow);
-
-  return rows;
 }
 
-function friendlyText(state) {
-  let text =
-    `## ⚽ 7v7 Erts United Friendly\n\n` +
-    `${complete(state.lineup) ? "**FINAL LINEUP**\n\n" : ""}`;
-
-  for (const [key, label] of POSITIONS) {
-    if (state.lineup[key]) {
-      // REAL Discord mention
-      text += `${label}: ${mention(state.lineup[key])}\n`;
-    } else {
-      text += `${label}: **OPEN**\n`;
-    }
-  }
-
-  text +=
-    `\n**➕ NEED ADDED**\n` +
-    `${needAddText(state)}\n`;
-
-  if (complete(state.lineup)) {
-    text += `\n✅ **7/7 spots filled.**`;
-  } else {
-    text += `\n**${filled(state.lineup)}/7 spots filled.**`;
-  }
-
-  text +=
-    `\n\nClick your position to claim it. Need added? Click **➕ Need Add**.`;
-
-  return text;
-}
-
-function finalText(state) {
-  let text =
-    `## ⚽ 7v7 Erts United Friendly\n\n` +
-    `**FINAL LINEUP**\n\n`;
-
-  for (const [key, label] of POSITIONS) {
-    text += `${label}: ${mention(state.lineup[key])}\n`;
-  }
-
-  text +=
-    `\n**➕ NEED ADDED**\n` +
-    `${needAddText(state)}\n\n` +
-    `✅ **7/7 spots filled.**\n\n` +
-    `Need added? Click **➕ Need Add**.`;
-
-  return text;
-}
-
-async function createFriendly(channel) {
-  const state = {
-    channelId: channel.id,
-    guildId: channel.guild.id,
-    message: null,
-    messageId: null,
-    lineup: emptyLineup(),
-    needs: [],
-    createdBy: null,
-  };
-
-  // THIS IS THE ONLY MESSAGE CREATED BY !hostfriendly
-  const message = await channel.send({
-    content:
-      "@here\n\n" +
-      "## ⚽ 7v7 Erts United Friendly\n\n" +
-      "**7 spots. Click your position below.**\n\n" +
-      "GK: **OPEN**\n" +
-      "CB: **OPEN**\n" +
-      "CB2: **OPEN**\n" +
-      "CM: **OPEN**\n" +
-      "LW: **OPEN**\n" +
-      "RW: **OPEN**\n\n" +
-      "ST: **OPEN**\n\n" +
-      "**➕ NEED ADDED**\n" +
-      "None\n\n" +
-      "**0/7 spots filled.**\n\n" +
-      "Click your position to claim it. Need added? Click **➕ Need Add**.",
-    components: buildFriendlyButtons(state),
-    allowedMentions: {
-      parse: ["everyone"],
-    },
-  });
-
-  state.message = message;
-  state.messageId = message.id;
-
-  return state;
-}
-
-// ============================================================
-// ROBLOX
-// ============================================================
-
-function validRobloxUsername(username) {
-  return /^[A-Za-z0-9_]{3,20}$/.test(username);
-}
-
-async function lookupRoblox(username) {
-  const controller = new AbortController();
-
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, 8000);
-
-  try {
-    const response = await fetch(
-      "https://users.roblox.com/v1/usernames/users",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          usernames: [username],
-          excludeBannedUsers: false,
-        }),
-        signal: controller.signal,
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Roblox API HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-    const user = data?.data?.[0];
-
-    if (!user?.id || !user?.name) {
-      return null;
-    }
-
-    return {
-      id: String(user.id),
-      name: user.name,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function removePendingForChannel(channelId) {
-  for (const [userId, data] of pendingDMs.entries()) {
-    if (data.channelId === channelId) {
-      pendingDMs.delete(userId);
-    }
-  }
-}
-
-// ============================================================
-// FRIENDLY BUTTON INTERACTIONS
-// ============================================================
-
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isButton()) {
-    return;
-  }
-
-  if (interaction.guildId !== GUILD_ID) {
-    return;
-  }
-
-  const state = friendlies.get(interaction.channelId);
-
-  if (!state || state.messageId !== interaction.message.id) {
-    await interaction
-      .reply({
-        content: "❌ This friendly is no longer active.",
-        ephemeral: true,
-      })
-      .catch(() => {});
-
-    return;
-  }
-
-  // ==========================================================
-  // NEED ADD
-  // ==========================================================
-
-  if (interaction.customId === NEED_ADD) {
-    // Immediately acknowledge the button.
-    await interaction.deferUpdate().catch(() => {});
-
-    await lock(state.channelId, async () => {
-      pendingDMs.set(interaction.user.id, {
-        channelId: state.channelId,
-        guildId: state.guildId,
-        messageId: state.messageId,
-        expires: Date.now() + DM_TIMEOUT,
-      });
-
-      try {
-        await interaction.user.send(
-          "⚽ **erts United Friendly**\n\n" +
-          "What's ur Roblox username?\n\n" +
-          "Reply to this DM with your Roblox username. You have 10 minutes."
-        );
-      } catch (error) {
-        pendingDMs.delete(interaction.user.id);
-
-        console.error(
-          "❌ Need Add DM error:",
-          error?.message || error
-        );
-
-        await interaction
-          .followUp({
-            content:
-              "❌ I couldn't DM you. Turn on DMs from server members and click **➕ Need Add** again.",
-            ephemeral: true,
-          })
-          .catch(() => {});
-      }
-    });
-
-    return;
-  }
-
-  // ==========================================================
-  // POSITION BUTTON
-  // ==========================================================
-
-  const position = POSITIONS.find(
-    (entry) => entry[2] === interaction.customId
-  );
-
-  if (!position) {
-    return;
-  }
-
-  // Acknowledge immediately so the button doesn't timeout.
-  await interaction.deferUpdate().catch(() => {});
-
-  await lock(state.channelId, async () => {
-    const userId = interaction.user.id;
-    const positionKey = position[0];
-    const positionLabel = position[1];
-
-    // Someone already took this spot.
-    if (state.lineup[positionKey]) {
-      return;
-    }
-
-    // A player can only have one position.
-    if (Object.values(state.lineup).includes(userId)) {
-      return;
-    }
-
-    // Claim the spot.
-    state.lineup[positionKey] = userId;
-
-    // Remove them from Need Add if they were there.
-    state.needs = state.needs.filter(
-      (entry) => entry.discordId !== userId
-    );
-
-    const isComplete = complete(state.lineup);
-
-    if (isComplete) {
-      completed.set(state.channelId, state);
-    }
-
-    // ========================================================
-    // THIS IS THE IMPORTANT PART
-    // It edits the SAME original message.
-    // ========================================================
-
-    await interaction.editReply({
-      content: isComplete
-        ? finalText(state)
-        : friendlyText(state),
-
-      components: buildFriendlyButtons(state),
-
-      // Only the newly added player is pinged on this edit.
+function safeReply(message, content) {
+  return message
+    .reply({
+      content,
       allowedMentions: {
-        users: [userId],
+        parse: [],
       },
-    });
-
-    await sendLog(
-      `👤 ${interaction.user.tag} claimed ${positionLabel} in <#${state.channelId}>.`
-    );
-
-    if (isComplete) {
-      await sendLog(
-        `✅ 7/7 friendly completed in <#${state.channelId}>.`
-      );
-    }
-  }).catch((error) => {
-    console.error(
-      "❌ Friendly button error:",
-      error
-    );
-  });
-});
-
-// ============================================================
-// ROBLOX DM RESPONSE
-// ============================================================
-
-client.on("messageCreate", async (message) => {
-  try {
-    if (message.author.bot) {
-      return;
-    }
-
-    // Only process DMs here.
-    if (message.guildId) {
-      return;
-    }
-
-    const pending = pendingDMs.get(message.author.id);
-
-    if (!pending) {
-      return;
-    }
-
-    if (pending.expires <= Date.now()) {
-      pendingDMs.delete(message.author.id);
-
-      await message.reply(
-        "❌ That request expired. Go back to the friendly and click **➕ Need Add** again."
-      );
-
-      return;
-    }
-
-    const username = message.content.trim();
-
-    if (!validRobloxUsername(username)) {
-      await message.reply(
-        "❌ Send only your Roblox username. Use 3-20 letters, numbers, or underscores."
-      );
-
-      return;
-    }
-
-    const state = friendlies.get(pending.channelId);
-
-    if (!state || state.messageId !== pending.messageId) {
-      pendingDMs.delete(message.author.id);
-
-      await message.reply(
-        "❌ That friendly is no longer active."
-      );
-
-      return;
-    }
-
-    await lock(state.channelId, async () => {
-      let roblox;
-
-      try {
-        roblox = await lookupRoblox(username);
-      } catch (error) {
-        console.error(
-          "❌ Roblox lookup error:",
-          error?.message || error
-        );
-
-        await message.reply(
-          "❌ Roblox couldn't be checked right now. Send your username again in a moment."
-        );
-
-        return;
-      }
-
-      if (!roblox) {
-        await message.reply(
-          "❌ I couldn't find that Roblox username. Check the spelling and send it again."
-        );
-
-        return;
-      }
-
-      const guild = await client.guilds.fetch(
-        pending.guildId
-      );
-
-      const member = await getMember(
-        guild,
-        message.author.id
-      );
-
-      const discordName =
-        member?.displayName ||
-        message.author.globalName ||
-        message.author.username;
-
-      const entry = {
-        discordId: message.author.id,
-        discordName,
-        roblox: roblox.name,
-      };
-
-      const existing = state.needs.findIndex(
-        (x) => x.discordId === message.author.id
-      );
-
-      if (existing >= 0) {
-        state.needs[existing] = entry;
-      } else {
-        state.needs.push(entry);
-      }
-
-      pendingDMs.delete(message.author.id);
-
-      // EDIT THE SAME FRIENDLY MESSAGE AGAIN
-      await state.message.edit({
-        content: complete(state.lineup)
-          ? finalText(state)
-          : friendlyText(state),
-
-        components: buildFriendlyButtons(state),
-
-        allowedMentions: {
-          users: [],
-        },
-      });
-
-      await message.reply(
-        `✅ Got it. Roblox username **${roblox.name}** is now on the friendly's **NEED ADDED** list.`
-      );
-    });
-  } catch (error) {
-    console.error(
-      "❌ Roblox DM handler error:",
-      error
-    );
-  }
-});
-
-// ============================================================
-// GENERAL HELPERS
-// ============================================================
+    })
+    .catch(() => {});
+}
 
 async function deleteMessage(message) {
   try {
@@ -662,115 +229,876 @@ async function deleteMessage(message) {
       await message.delete();
     }
   } catch (error) {
-    console.error(
-      "❌ Delete error:",
-      error?.message || error
+    console.log(
+      "⚠️ Could not delete message:",
+      error.message
     );
   }
 }
 
-function extractRoleText(message, role) {
-  const roleTag = `<@&${role.id}>`;
-  const index = message.content.indexOf(roleTag);
+async function sendLog(text) {
+  try {
+    const channel =
+      await client.channels.fetch(
+        LOG_CHANNEL_ID
+      );
 
-  if (index === -1) {
-    return "";
-  }
-
-  return message.content
-    .slice(index + roleTag.length)
-    .trim();
-}
-
-async function purge(channel) {
-  if (!channel?.isTextBased()) {
-    return;
-  }
-
-  const fourteenDays =
-    14 * 24 * 60 * 60 * 1000;
-
-  for (let batch = 0; batch < 50; batch++) {
-    const messages =
-      await channel.messages.fetch({
-        limit: 100,
+    if (channel?.isTextBased()) {
+      await channel.send({
+        content: text,
+        allowedMentions: {
+          parse: [],
+        },
       });
-
-    if (!messages.size) {
-      break;
     }
-
-    const recent = messages.filter(
-      (message) =>
-        message.deletable &&
-        Date.now() - message.createdTimestamp <
-          fourteenDays
+  } catch (error) {
+    console.log(
+      "⚠️ Log error:",
+      error.message
     );
+  }
+}
 
-    const old = messages.filter(
-      (message) =>
-        message.deletable &&
-        Date.now() - message.createdTimestamp >=
-          fourteenDays
-    );
+// ============================================================
+// FRIENDLY LOCK
+// ============================================================
 
-    let deletedAnything = false;
+async function withFriendlyLock(
+  channelId,
+  callback
+) {
+  const previous =
+    friendlyLocks.get(
+      channelId
+    ) || Promise.resolve();
 
-    if (recent.size) {
-      try {
-        await channel.bulkDelete(
-          recent,
-          true
-        );
+  const current =
+    previous
+      .catch(() => {})
+      .then(callback);
 
-        deletedAnything = true;
-      } catch {
-        for (const message of recent.values()) {
-          try {
-            await message.delete();
-            deletedAnything = true;
-          } catch {}
-        }
-      }
-    }
+  friendlyLocks.set(
+    channelId,
+    current
+  );
 
-    for (const message of old.values()) {
-      try {
-        await message.delete();
-        deletedAnything = true;
-
-        await new Promise((resolve) =>
-          setTimeout(resolve, 250)
-        );
-      } catch {}
-    }
-
-    if (!deletedAnything) {
-      break;
-    }
-
-    if (messages.size < 100) {
-      break;
+  try {
+    return await current;
+  } finally {
+    if (
+      friendlyLocks.get(
+        channelId
+      ) === current
+    ) {
+      friendlyLocks.delete(
+        channelId
+      );
     }
   }
 }
+
+// ============================================================
+// FRIENDLY DISPLAY
+// ============================================================
+
+function getNeedAddText(state) {
+  if (!state.needs.length) {
+    return "None";
+  }
+
+  return state.needs
+    .map(
+      (player) =>
+        `• **${player.discordName}** → Roblox: **${player.roblox}**`
+    )
+    .join("\n");
+}
+
+function makeButtons(state) {
+  const row1 =
+    new ActionRowBuilder();
+
+  const row2 =
+    new ActionRowBuilder();
+
+  const row3 =
+    new ActionRowBuilder();
+
+  POSITIONS
+    .slice(0, 4)
+    .forEach(
+      ([key, label, customId]) => {
+        const taken =
+          Boolean(
+            state.lineup[key]
+          );
+
+        row1.addComponents(
+          new ButtonBuilder()
+            .setCustomId(
+              customId
+            )
+            .setLabel(
+              taken
+                ? `${label} ✓`
+                : label
+            )
+            .setStyle(
+              taken
+                ? ButtonStyle.Success
+                : ButtonStyle.Primary
+            )
+            .setDisabled(
+              taken ||
+                lineupComplete(
+                  state.lineup
+                )
+            )
+        );
+      }
+    );
+
+  POSITIONS
+    .slice(4)
+    .forEach(
+      ([key, label, customId]) => {
+        const taken =
+          Boolean(
+            state.lineup[key]
+          );
+
+        row2.addComponents(
+          new ButtonBuilder()
+            .setCustomId(
+              customId
+            )
+            .setLabel(
+              taken
+                ? `${label} ✓`
+                : label
+            )
+            .setStyle(
+              taken
+                ? ButtonStyle.Success
+                : ButtonStyle.Primary
+            )
+            .setDisabled(
+              taken ||
+                lineupComplete(
+                  state.lineup
+                )
+            )
+        );
+      }
+    );
+
+  row3.addComponents(
+    new ButtonBuilder()
+      .setCustomId(
+        NEED_ADD_BUTTON
+      )
+      .setLabel(
+        "➕ Need Add"
+      )
+      .setStyle(
+        ButtonStyle.Secondary
+      )
+  );
+
+  return [
+    row1,
+    row2,
+    row3,
+  ];
+}
+
+function buildFriendlyMessage(
+  state
+) {
+  let text =
+    "## ⚽ 7v7 Erts United Friendly\n\n";
+
+  if (
+    lineupComplete(
+      state.lineup
+    )
+  ) {
+    text +=
+      "**FINAL LINEUP**\n\n";
+  }
+
+  for (
+    const [
+      key,
+      label,
+    ] of POSITIONS
+  ) {
+    if (
+      state.lineup[key]
+    ) {
+      text +=
+        `${label}: ${mentionUser(
+          state.lineup[key]
+        )}\n`;
+    } else {
+      text +=
+        `${label}: **OPEN**\n`;
+    }
+  }
+
+  text +=
+    `\n**➕ NEED ADDED**\n`;
+
+  text +=
+    getNeedAddText(
+      state
+    );
+
+  text +=
+    `\n\n**${lineupCount(
+      state.lineup
+    )}/7 spots filled.**`;
+
+  if (
+    lineupComplete(
+      state.lineup
+    )
+  ) {
+    text +=
+      "\n\n✅ **7/7 spots filled.**";
+  }
+
+  text +=
+    "\n\nClick your position to claim it. Need added? Click **➕ Need Add**.";
+
+  return text;
+}
+
+// ============================================================
+// CREATE FRIENDLY
+// ============================================================
+
+async function createFriendly(
+  channel
+) {
+  const state = {
+    channelId:
+      channel.id,
+
+    guildId:
+      channel.guild.id,
+
+    message:
+      null,
+
+    messageId:
+      null,
+
+    lineup:
+      emptyLineup(),
+
+    needs:
+      [],
+
+    createdBy:
+      null,
+  };
+
+  // ONLY ONE BOT MESSAGE
+  const message =
+    await channel.send({
+      content:
+        "@here\n\n" +
+        buildFriendlyMessage(
+          state
+        ),
+
+      components:
+        makeButtons(
+          state
+        ),
+
+      allowedMentions: {
+        parse: [
+          "everyone",
+        ],
+      },
+    });
+
+  state.message =
+    message;
+
+  state.messageId =
+    message.id;
+
+  return state;
+}
+
+// ============================================================
+// ROBLOX USERNAME LOOKUP
+// ============================================================
+
+function validRobloxUsername(
+  username
+) {
+  return /^[A-Za-z0-9_]{3,20}$/.test(
+    username
+  );
+}
+
+async function lookupRobloxUser(
+  username
+) {
+  const controller =
+    new AbortController();
+
+  const timeout =
+    setTimeout(
+      () =>
+        controller.abort(),
+      8000
+    );
+
+  try {
+    const response =
+      await fetch(
+        "https://users.roblox.com/v1/usernames/users",
+        {
+          method:
+            "POST",
+
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+
+          body:
+            JSON.stringify({
+              usernames: [
+                username,
+              ],
+              excludeBannedUsers:
+                false,
+            }),
+
+          signal:
+            controller.signal,
+        }
+      );
+
+    if (
+      !response.ok
+    ) {
+      throw new Error(
+        `Roblox API returned ${response.status}`
+      );
+    }
+
+    const data =
+      await response.json();
+
+    const user =
+      data?.data?.[0];
+
+    if (
+      !user?.id ||
+      !user?.name
+    ) {
+      return null;
+    }
+
+    return {
+      id: String(
+        user.id
+      ),
+      name:
+        user.name,
+    };
+  } finally {
+    clearTimeout(
+      timeout
+    );
+  }
+}
+
+// ============================================================
+// REMOVE PENDING ROBLOX REQUESTS
+// ============================================================
+
+function clearPendingDMs(
+  channelId
+) {
+  for (
+    const [
+      userId,
+      data,
+    ] of pendingRobloxDMs
+  ) {
+    if (
+      data.channelId ===
+      channelId
+    ) {
+      pendingRobloxDMs.delete(
+        userId
+      );
+    }
+  }
+}
+
+// ============================================================
+// BUTTONS
+// ============================================================
+
+client.on(
+  "interactionCreate",
+  async (
+    interaction
+  ) => {
+    try {
+      if (
+        !interaction.isButton()
+      ) {
+        return;
+      }
+
+      if (
+        interaction.guildId !==
+        GUILD_ID
+      ) {
+        await interaction
+          .reply({
+            content:
+              "❌ This bot only works in the erts United server.",
+            ephemeral:
+              true,
+          })
+          .catch(() => {});
+
+        return;
+      }
+
+      const state =
+        activeFriendlies.get(
+          interaction.channelId
+        );
+
+      if (
+        !state ||
+        state.messageId !==
+          interaction.message.id
+      ) {
+        await interaction
+          .reply({
+            content:
+              "❌ This friendly is no longer active.",
+            ephemeral:
+              true,
+          })
+          .catch(() => {});
+
+        return;
+      }
+
+      // ======================================================
+      // NEED ADD
+      // ======================================================
+
+      if (
+        interaction.customId ===
+        NEED_ADD_BUTTON
+      ) {
+        await interaction
+          .deferUpdate()
+          .catch(() => {});
+
+        pendingRobloxDMs.set(
+          interaction.user.id,
+          {
+            channelId:
+              state.channelId,
+
+            guildId:
+              state.guildId,
+
+            messageId:
+              state.messageId,
+
+            expires:
+              Date.now() +
+              ROBLOX_DM_TIMEOUT,
+          }
+        );
+
+        try {
+          await interaction.user.send(
+            "⚽ **erts United Friendly**\n\n" +
+              "What's ur Roblox username?\n\n" +
+              "Reply to this DM with your Roblox username. You have 10 minutes."
+          );
+        } catch (error) {
+          pendingRobloxDMs.delete(
+            interaction.user.id
+          );
+
+          await interaction
+            .followUp({
+              content:
+                "❌ I couldn't DM you. Turn on DMs from server members and click **➕ Need Add** again.",
+              ephemeral:
+                true,
+            })
+            .catch(() => {});
+        }
+
+        return;
+      }
+
+      // ======================================================
+      // POSITION
+      // ======================================================
+
+      const position =
+        POSITIONS.find(
+          (entry) =>
+            entry[2] ===
+            interaction.customId
+        );
+
+      if (!position) {
+        return;
+      }
+
+      await interaction
+        .deferUpdate()
+        .catch(() => {});
+
+      await withFriendlyLock(
+        state.channelId,
+        async () => {
+          const [
+            positionKey,
+            positionLabel,
+          ] = position;
+
+          const userId =
+            interaction.user.id;
+
+          // Already taken
+          if (
+            state.lineup[
+              positionKey
+            ]
+          ) {
+            return;
+          }
+
+          // Player already has another position
+          if (
+            Object.values(
+              state.lineup
+            ).includes(
+              userId
+            )
+          ) {
+            return;
+          }
+
+          // Claim position
+          state.lineup[
+            positionKey
+          ] = userId;
+
+          // Remove from need-added list
+          state.needs =
+            state.needs.filter(
+              (player) =>
+                player.discordId !==
+                userId
+            );
+
+          const finished =
+            lineupComplete(
+              state.lineup
+            );
+
+          if (finished) {
+            completedFriendlies.set(
+              state.channelId,
+              state
+            );
+          }
+
+          // ==================================================
+          // EDIT THE ORIGINAL MESSAGE
+          // ==================================================
+
+          await interaction.editReply(
+            {
+              content:
+                buildFriendlyMessage(
+                  state
+                ),
+
+              components:
+                makeButtons(
+                  state
+                ),
+
+              allowedMentions: {
+                users: [
+                  userId,
+                ],
+              },
+            }
+          );
+
+          await sendLog(
+            `👤 ${interaction.user.tag} claimed ${positionLabel} in <#${state.channelId}>.`
+          );
+
+          if (finished) {
+            await sendLog(
+              `✅ 7/7 friendly completed in <#${state.channelId}>.`
+            );
+          }
+        }
+      );
+    } catch (error) {
+      console.error(
+        "❌ Button error:",
+        error
+      );
+    }
+  }
+);
+
+// ============================================================
+// ROBLOX DM HANDLER
+// ============================================================
+
+client.on(
+  "messageCreate",
+  async (
+    message
+  ) => {
+    try {
+      if (
+        message.author.bot
+      ) {
+        return;
+      }
+
+      // Only DMs
+      if (
+        message.guildId
+      ) {
+        return;
+      }
+
+      const pending =
+        pendingRobloxDMs.get(
+          message.author.id
+        );
+
+      if (!pending) {
+        return;
+      }
+
+      if (
+        pending.expires <=
+        Date.now()
+      ) {
+        pendingRobloxDMs.delete(
+          message.author.id
+        );
+
+        await message.reply(
+          "❌ That request expired. Click **➕ Need Add** again."
+        );
+
+        return;
+      }
+
+      const username =
+        message.content.trim();
+
+      if (
+        !validRobloxUsername(
+          username
+        )
+      ) {
+        await message.reply(
+          "❌ That doesn't look like a valid Roblox username. Send only your Roblox username."
+        );
+
+        return;
+      }
+
+      const state =
+        activeFriendlies.get(
+          pending.channelId
+        );
+
+      if (
+        !state ||
+        state.messageId !==
+          pending.messageId
+      ) {
+        pendingRobloxDMs.delete(
+          message.author.id
+        );
+
+        await message.reply(
+          "❌ That friendly is no longer active."
+        );
+
+        return;
+      }
+
+      await withFriendlyLock(
+        state.channelId,
+        async () => {
+          let robloxUser;
+
+          try {
+            robloxUser =
+              await lookupRobloxUser(
+                username
+              );
+          } catch (error) {
+            console.error(
+              "❌ Roblox lookup error:",
+              error
+            );
+
+            await message.reply(
+              "❌ Roblox couldn't be checked right now. Try sending your username again."
+            );
+
+            return;
+          }
+
+          if (
+            !robloxUser
+          ) {
+            await message.reply(
+              "❌ I couldn't find that Roblox username. Check the spelling and send it again."
+            );
+
+            return;
+          }
+
+          const guild =
+            await client.guilds.fetch(
+              GUILD_ID
+            );
+
+          let member =
+            null;
+
+          try {
+            member =
+              await guild.members.fetch(
+                message.author.id
+              );
+          } catch {}
+
+          const discordName =
+            member?.displayName ||
+            message.author.globalName ||
+            message.author.username;
+
+          const entry = {
+            discordId:
+              message.author.id,
+
+            discordName:
+              discordName,
+
+            roblox:
+              robloxUser.name,
+          };
+
+          const existing =
+            state.needs.findIndex(
+              (player) =>
+                player.discordId ===
+                message.author.id
+            );
+
+          if (
+            existing >= 0
+          ) {
+            state.needs[
+              existing
+            ] = entry;
+          } else {
+            state.needs.push(
+              entry
+            );
+          }
+
+          pendingRobloxDMs.delete(
+            message.author.id
+          );
+
+          // EDIT THE SAME FRIENDLY MESSAGE
+          await state.message.edit(
+            {
+              content:
+                buildFriendlyMessage(
+                  state
+                ),
+
+              components:
+                makeButtons(
+                  state
+                ),
+
+              allowedMentions: {
+                parse: [],
+              },
+            }
+          );
+
+          await message.reply(
+            `✅ Added **${robloxUser.name}** to the friendly's **NEED ADDED** list.`
+          );
+        }
+      );
+    } catch (error) {
+      console.error(
+        "❌ DM handler error:",
+        error
+      );
+    }
+  }
+);
 
 // ============================================================
 // MUSIC
 // ============================================================
 
-const music = new Map();
-
-function getMusic(guildId) {
-  if (music.has(guildId)) {
-    return music.get(guildId);
+function getMusicData(
+  guildId
+) {
+  if (
+    musicQueues.has(
+      guildId
+    )
+  ) {
+    return musicQueues.get(
+      guildId
+    );
   }
 
-  const player = createAudioPlayer({
-    behaviors: {
-      noSubscriber: NoSubscriberBehavior.Pause,
-    },
-  });
+  const player =
+    createAudioPlayer({
+      behaviors: {
+        noSubscriber:
+          NoSubscriberBehavior.Pause,
+      },
+    });
 
   const data = {
     queue: [],
@@ -784,26 +1112,42 @@ function getMusic(guildId) {
   player.on(
     AudioPlayerStatus.Idle,
     async () => {
-      const d = music.get(guildId);
+      const current =
+        musicQueues.get(
+          guildId
+        );
 
-      if (!d) {
+      if (!current) {
         return;
       }
 
-      if (d.loop && d.current) {
+      if (
+        current.loop &&
+        current.current
+      ) {
         try {
-          await startTrack(
+          await startMusicTrack(
             guildId,
-            d.current
+            current.current
           );
         } catch {
-          d.current = null;
-          await nextTrack(guildId);
+          current.current =
+            null;
+
+          await playNextTrack(
+            guildId
+          );
         }
-      } else {
-        d.current = null;
-        await nextTrack(guildId);
+
+        return;
       }
+
+      current.current =
+        null;
+
+      await playNextTrack(
+        guildId
+      );
     }
   );
 
@@ -815,26 +1159,42 @@ function getMusic(guildId) {
         error
       );
 
-      const d = music.get(guildId);
+      const current =
+        musicQueues.get(
+          guildId
+        );
 
-      if (d) {
-        d.current = null;
-        await nextTrack(guildId);
+      if (!current) {
+        return;
       }
+
+      current.current =
+        null;
+
+      await playNextTrack(
+        guildId
+      );
     }
   );
 
-  music.set(guildId, data);
+  musicQueues.set(
+    guildId,
+    data
+  );
 
   return data;
 }
 
-async function connectVC(channel) {
+async function connectToVoice(
+  channel
+) {
   if (
     !channel ||
     (
-      channel.type !== ChannelType.GuildVoice &&
-      channel.type !== ChannelType.GuildStageVoice
+      channel.type !==
+        ChannelType.GuildVoice &&
+      channel.type !==
+        ChannelType.GuildStageVoice
     )
   ) {
     throw new Error(
@@ -844,10 +1204,16 @@ async function connectVC(channel) {
 
   const connection =
     joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
+      channelId:
+        channel.id,
+
+      guildId:
+        channel.guild.id,
+
       adapterCreator:
-        channel.guild.voiceAdapterCreator,
+        channel.guild
+          .voiceAdapterCreator,
+
       selfDeaf: true,
       selfMute: false,
     });
@@ -861,9 +1227,16 @@ async function connectVC(channel) {
   return connection;
 }
 
-async function findTrack(query) {
+async function getTrack(
+  query
+) {
+  const validation =
+    play.yt_validate(
+      query
+    );
+
   if (
-    play.yt_validate(query) ===
+    validation ===
     "video"
   ) {
     const info =
@@ -887,10 +1260,14 @@ async function findTrack(query) {
   const results =
     await play.search(
       query,
-      { limit: 1 }
+      {
+        limit: 1,
+      }
     );
 
-  if (!results.length) {
+  if (
+    !results.length
+  ) {
     throw new Error(
       "Song not found."
     );
@@ -900,17 +1277,24 @@ async function findTrack(query) {
     title:
       results[0].title ||
       "Unknown",
-    url: results[0].url,
+
+    url:
+      results[0].url,
   };
 }
 
-async function startTrack(
+async function startMusicTrack(
   guildId,
   track
 ) {
-  const d = getMusic(guildId);
+  const data =
+    getMusicData(
+      guildId
+    );
 
-  if (!d.connection) {
+  if (
+    !data.connection
+  ) {
     throw new Error(
       "Not connected to voice."
     );
@@ -935,42 +1319,56 @@ async function startTrack(
       }
     );
 
-  d.current = track;
+  data.current =
+    track;
 
-  d.player.play(resource);
+  data.player.play(
+    resource
+  );
 
-  d.connection.subscribe(
-    d.player
+  data.connection.subscribe(
+    data.player
   );
 }
 
-async function nextTrack(guildId) {
-  const d = music.get(guildId);
+async function playNextTrack(
+  guildId
+) {
+  const data =
+    musicQueues.get(
+      guildId
+    );
 
-  if (!d) {
+  if (!data) {
     return;
   }
 
   const track =
-    d.queue.shift();
+    data.queue.shift();
 
   if (!track) {
-    d.current = null;
+    data.current =
+      null;
+
     return;
   }
 
   try {
-    await startTrack(
+    await startMusicTrack(
       guildId,
       track
     );
 
-    if (d.textChannel) {
-      await d.textChannel.send(
-        noMentions(
-          `▶️ Now playing: **${track.title}**`
-        )
-      );
+    if (
+      data.textChannel
+    ) {
+      await data.textChannel.send({
+        content:
+          `▶️ Now playing: **${track.title}**`,
+        allowedMentions: {
+          parse: [],
+        },
+      });
     }
   } catch (error) {
     console.error(
@@ -978,11 +1376,81 @@ async function nextTrack(guildId) {
       error
     );
 
-    d.current = null;
+    data.current =
+      null;
 
-    await nextTrack(
+    await playNextTrack(
       guildId
     );
+  }
+}
+
+// ============================================================
+// PURGE
+// ============================================================
+
+async function purgeChannel(
+  channel
+) {
+  if (
+    !channel?.isTextBased()
+  ) {
+    return;
+  }
+
+  for (
+    let i = 0;
+    i < 50;
+    i++
+  ) {
+    const messages =
+      await channel.messages.fetch({
+        limit: 100,
+      });
+
+    if (
+      !messages.size
+    ) {
+      break;
+    }
+
+    let deleted =
+      false;
+
+    for (
+      const message of
+      messages.values()
+    ) {
+      if (
+        !message.deletable
+      ) {
+        continue;
+      }
+
+      try {
+        await message.delete();
+        deleted = true;
+
+        await new Promise(
+          (resolve) =>
+            setTimeout(
+              resolve,
+              200
+            )
+        );
+      } catch {}
+    }
+
+    if (!deleted) {
+      break;
+    }
+
+    if (
+      messages.size <
+      100
+    ) {
+      break;
+    }
   }
 }
 
@@ -992,46 +1460,65 @@ async function nextTrack(guildId) {
 
 client.on(
   "messageCreate",
-  async (message) => {
+  async (
+    message
+  ) => {
     try {
       if (
-        message.author.bot ||
-        message.guildId !== GUILD_ID ||
-        !message.content.startsWith(PREFIX)
+        message.author.bot
+      ) {
+        return;
+      }
+
+      // IMPORTANT:
+      // Ignore all guilds except Erts United.
+      if (
+        message.guildId !==
+        GUILD_ID
+      ) {
+        return;
+      }
+
+      // Ignore non-prefix messages.
+      if (
+        !message.content.startsWith(
+          PREFIX
+        )
       ) {
         return;
       }
 
       const args =
         message.content
-          .slice(PREFIX.length)
+          .slice(
+            PREFIX.length
+          )
           .trim()
           .split(/\s+/)
           .filter(Boolean);
 
       const command =
-        (args.shift() || "")
-          .toLowerCase();
+        (
+          args.shift() ||
+          ""
+        ).toLowerCase();
 
       if (!command) {
         return;
       }
 
-      const reply = (content) =>
-        message
-          .reply(
-            noMentions(content)
-          )
-          .catch(() => {});
-
       // ======================================================
       // HELP
       // ======================================================
 
-      if (command === "help") {
-        await reply(
+      if (
+        command ===
+        "help"
+      ) {
+        await safeReply(
+          message,
           [
-            "**erts United Bot**",
+            "**erts United Bot Commands**",
             "",
             "**Friendly**",
             "`!hostfriendly`",
@@ -1039,7 +1526,7 @@ client.on(
             "`!friendlylink`",
             "`!endfriendly`",
             "`!end friendly`",
-            "`!result <opponent> <score> <win/draw/loss> [details]`",
+            "`!result <opponent> <score> <win/draw/loss>`",
             "",
             "**Utility**",
             "`!dmrole @role <message>`",
@@ -1052,8 +1539,6 @@ client.on(
             "`!stop`",
             "`!loop`",
             "`!queue`",
-            "",
-            "Mention the bot for AI chat.",
           ].join("\n")
         );
 
@@ -1065,36 +1550,37 @@ client.on(
       // ======================================================
 
       if (
-        command === "hostfriendly" ||
+        command ===
+          "hostfriendly" ||
         (
-          command === "host" &&
+          command ===
+            "host" &&
           args[0]?.toLowerCase() ===
             "friendly"
         )
       ) {
-        if (!isHoster(message)) {
-          await reply(
+        if (
+          !isFriendlyHoster(
+            message
+          )
+        ) {
+          await safeReply(
+            message,
             "❌ You need the Friendly Hoster role."
           );
+
           return;
         }
 
         if (
-          !message.channel.isTextBased() ||
-          !message.guild
-        ) {
-          return;
-        }
-
-        const old =
-          friendlies.get(
+          activeFriendlies.has(
             message.channel.id
-          );
-
-        if (old) {
+          )
+        ) {
           await deleteMessage(
             message
           );
+
           return;
         }
 
@@ -1107,28 +1593,29 @@ client.on(
           state.createdBy =
             message.author.id;
 
-          friendlies.set(
+          activeFriendlies.set(
             message.channel.id,
             state
           );
 
-          // Delete !hostfriendly.
-          // This leaves only ONE bot message.
+          // Delete the command so the
+          // bot leaves only ONE friendly message.
           await deleteMessage(
             message
           );
 
           await sendLog(
-            `📋 Friendly hosted by ${message.author.tag} in <#${message.channel.id}>.`
+            `📋 Friendly started by ${message.author.tag} in <#${message.channel.id}>.`
           );
         } catch (error) {
           console.error(
-            "❌ !hostfriendly error:",
+            "❌ Host friendly error:",
             error
           );
 
-          await reply(
-            "❌ I couldn't create the friendly. Check the bot's channel permissions and @here permission."
+          await safeReply(
+            message,
+            "❌ Couldn't create the friendly. Make sure the bot can send messages and use @here in this channel."
           );
         }
 
@@ -1139,29 +1626,39 @@ client.on(
       // FRIENDLY LINK
       // ======================================================
 
-      if (command === "friendlylink") {
-        if (!isHoster(message)) {
-          await reply(
+      if (
+        command ===
+        "friendlylink"
+      ) {
+        if (
+          !isFriendlyHoster(
+            message
+          )
+        ) {
+          await safeReply(
+            message,
             "❌ You need the Friendly Hoster role."
           );
+
           return;
         }
 
         const state =
-          friendlies.get(
-            message.channel.id
-          ) ||
-          completed.get(
+          completedFriendlies.get(
             message.channel.id
           );
 
         if (
           !state ||
-          !complete(state.lineup)
+          !lineupComplete(
+            state.lineup
+          )
         ) {
-          await reply(
-            "❌ The friendly isn't full yet."
+          await safeReply(
+            message,
+            "❌ There isn't a completed friendly here."
           );
+
           return;
         }
 
@@ -1169,18 +1666,19 @@ client.on(
         let failed = 0;
 
         for (
-          const id of Object.values(
+          const userId of
+          Object.values(
             state.lineup
           )
         ) {
           try {
             const member =
               await message.guild.members.fetch(
-                id
+                userId
               );
 
             await member.send(
-              `⚽ **erts United Friendly**\n\nYou're in the 7v7 lineup.\n\nJoin here: ${INVITE}`
+              `⚽ **erts United Friendly**\n\nYou're in the 7v7 lineup.\n\nJoin here: ${INVITE_LINK}`
             );
 
             sent++;
@@ -1189,8 +1687,9 @@ client.on(
           }
         }
 
-        await reply(
-          `✅ Friendly link sent to **${sent}** player(s).\n❌ Failed: **${failed}**.`
+        await safeReply(
+          message,
+          `✅ Friendly link sent to **${sent}** players.\n❌ Failed: **${failed}**.`
         );
 
         return;
@@ -1201,29 +1700,37 @@ client.on(
       // ======================================================
 
       if (
-        command === "endfriendly" ||
+        command ===
+          "endfriendly" ||
         (
-          command === "end" &&
+          command ===
+            "end" &&
           args[0]?.toLowerCase() ===
             "friendly"
         )
       ) {
-        if (!isHoster(message)) {
-          await reply(
+        if (
+          !isFriendlyHoster(
+            message
+          )
+        ) {
+          await safeReply(
+            message,
             "❌ You need the Friendly Hoster role."
           );
+
           return;
         }
 
-        friendlies.delete(
+        activeFriendlies.delete(
           message.channel.id
         );
 
-        completed.delete(
+        completedFriendlies.delete(
           message.channel.id
         );
 
-        removePendingForChannel(
+        clearPendingDMs(
           message.channel.id
         );
 
@@ -1231,7 +1738,7 @@ client.on(
           message
         );
 
-        await purge(
+        await purgeChannel(
           message.channel
         );
 
@@ -1242,11 +1749,20 @@ client.on(
       // DM ROLE
       // ======================================================
 
-      if (command === "dmrole") {
-        if (!isHoster(message)) {
-          await reply(
+      if (
+        command ===
+        "dmrole"
+      ) {
+        if (
+          !isFriendlyHoster(
+            message
+          )
+        ) {
+          await safeReply(
+            message,
             "❌ You need the Friendly Hoster role."
           );
+
           return;
         }
 
@@ -1254,22 +1770,38 @@ client.on(
           message.mentions.roles.first();
 
         if (!role) {
-          await reply(
+          await safeReply(
+            message,
             "Usage: `!dmrole @role your message here`"
           );
+
           return;
         }
 
-        const text =
-          extractRoleText(
-            message,
-            role
+        const roleMention =
+          `<@&${role.id}>`;
+
+        const index =
+          message.content.indexOf(
+            roleMention
           );
 
+        const text =
+          index >= 0
+            ? message.content
+                .slice(
+                  index +
+                    roleMention.length
+                )
+                .trim()
+            : "";
+
         if (!text) {
-          await reply(
+          await safeReply(
+            message,
             "❌ You need to provide a message."
           );
+
           return;
         }
 
@@ -1308,7 +1840,8 @@ client.on(
           }
         }
 
-        await reply(
+        await safeReply(
+          message,
           `✅ Sent to **${sent}** member(s).\n❌ Failed: **${failed}**.`
         );
 
@@ -1319,11 +1852,20 @@ client.on(
       // DM ALL
       // ======================================================
 
-      if (command === "dmall") {
-        if (!isHoster(message)) {
-          await reply(
+      if (
+        command ===
+        "dmall"
+      ) {
+        if (
+          !isFriendlyHoster(
+            message
+          )
+        ) {
+          await safeReply(
+            message,
             "❌ You need the Friendly Hoster role."
           );
+
           return;
         }
 
@@ -1331,9 +1873,11 @@ client.on(
           args.join(" ");
 
         if (!text) {
-          await reply(
+          await safeReply(
+            message,
             "Usage: `!dmall your message here`"
           );
+
           return;
         }
 
@@ -1364,7 +1908,8 @@ client.on(
           }
         }
 
-        await reply(
+        await safeReply(
+          message,
           `✅ Sent to **${sent}** member(s).\n❌ Failed: **${failed}**.`
         );
 
@@ -1375,20 +1920,23 @@ client.on(
       // JOIN VC
       // ======================================================
 
-      if (command === "joinvc") {
+      if (
+        command ===
+        "joinvc"
+      ) {
         try {
           const channel =
             await client.channels.fetch(
-              FIXED_VC
+              FIXED_VC_ID
             );
 
           const connection =
-            await connectVC(
+            await connectToVoice(
               channel
             );
 
           const data =
-            getMusic(
+            getMusicData(
               message.guild.id
             );
 
@@ -1399,17 +1947,19 @@ client.on(
             data.player
           );
 
-          await reply(
+          await safeReply(
+            message,
             `🔊 Joined **${channel.name}**.`
           );
         } catch (error) {
           console.error(
-            "❌ !joinvc error:",
+            "❌ Join VC error:",
             error
           );
 
-          await reply(
-            "❌ Couldn't join the fixed VC."
+          await safeReply(
+            message,
+            "❌ Couldn't join the VC."
           );
         }
 
@@ -1420,11 +1970,20 @@ client.on(
       // RESULT
       // ======================================================
 
-      if (command === "result") {
-        if (!isHoster(message)) {
-          await reply(
+      if (
+        command ===
+        "result"
+      ) {
+        if (
+          !isFriendlyHoster(
+            message
+          )
+        ) {
+          await safeReply(
+            message,
             "❌ You need the Friendly Hoster role."
           );
+
           return;
         }
 
@@ -1449,9 +2008,12 @@ client.on(
             "WIN",
             "DRAW",
             "LOSS",
-          ].includes(outcome)
+          ].includes(
+            outcome
+          )
         ) {
-          await reply(
+          await safeReply(
+            message,
             "Usage: `!result <opponent> <score> <win/draw/loss> [details]`"
           );
 
@@ -1460,13 +2022,14 @@ client.on(
 
         const channel =
           await client.channels.fetch(
-            RESULTS_CHANNEL
+            RESULTS_CHANNEL_ID
           );
 
         if (
           !channel?.isTextBased()
         ) {
-          await reply(
+          await safeReply(
+            message,
             "❌ Results channel not found."
           );
 
@@ -1474,24 +2037,25 @@ client.on(
         }
 
         const title =
-          outcome === "WIN"
+          outcome ===
+          "WIN"
             ? "🏆 MATCH WIN"
-            : outcome === "DRAW"
+            : outcome ===
+              "DRAW"
             ? "🤝 MATCH DRAW"
             : "❌ MATCH LOSS";
 
         const embed =
           new EmbedBuilder()
-            .setTitle(title)
+            .setTitle(
+              title
+            )
             .addFields(
               {
                 name:
                   "Opponent",
                 value:
-                  opponent.slice(
-                    0,
-                    1024
-                  ),
+                  opponent,
                 inline:
                   true,
               },
@@ -1499,10 +2063,7 @@ client.on(
                 name:
                   "Score",
                 value:
-                  score.slice(
-                    0,
-                    1024
-                  ),
+                  score,
                 inline:
                   true,
               }
@@ -1527,8 +2088,9 @@ client.on(
           ],
         });
 
-        await reply(
-          `✅ Result posted in <#${RESULTS_CHANNEL}>.`
+        await safeReply(
+          message,
+          `✅ Result posted in <#${RESULTS_CHANNEL_ID}>.`
         );
 
         return;
@@ -1538,29 +2100,37 @@ client.on(
       // PLAY
       // ======================================================
 
-      if (command === "play") {
+      if (
+        command ===
+        "play"
+      ) {
         const query =
           args.join(" ");
 
         if (!query) {
-          await reply(
+          await safeReply(
+            message,
             "Usage: `!play <song or YouTube URL>`"
           );
+
           return;
         }
 
         if (
-          !message.member?.voice?.channel
+          !message.member?.voice
+            ?.channel
         ) {
-          await reply(
+          await safeReply(
+            message,
             "❌ You need to be in a voice channel."
           );
+
           return;
         }
 
         try {
           const data =
-            getMusic(
+            getMusicData(
               message.guild.id
             );
 
@@ -1568,8 +2138,9 @@ client.on(
             !data.connection
           ) {
             data.connection =
-              await connectVC(
-                message.member.voice.channel
+              await connectToVoice(
+                message.member
+                  .voice.channel
               );
 
             data.connection.subscribe(
@@ -1581,11 +2152,11 @@ client.on(
             message.channel;
 
           const track =
-            await findTrack(
+            await getTrack(
               query
             );
 
-          const playing =
+          const wasPlaying =
             Boolean(
               data.current
             );
@@ -1594,27 +2165,32 @@ client.on(
             track
           );
 
-          if (!playing) {
-            await nextTrack(
+          if (
+            !wasPlaying
+          ) {
+            await playNextTrack(
               message.guild.id
             );
 
-            await reply(
+            await safeReply(
+              message,
               `▶️ Playing **${track.title}**`
             );
           } else {
-            await reply(
+            await safeReply(
+              message,
               `✅ Added **${track.title}** to the queue.`
             );
           }
         } catch (error) {
           console.error(
-            "❌ !play error:",
+            "❌ Play error:",
             error
           );
 
-          await reply(
-            "❌ Couldn't play that track."
+          await safeReply(
+            message,
+            "❌ Couldn't play that."
           );
         }
 
@@ -1625,25 +2201,31 @@ client.on(
       // SKIP
       // ======================================================
 
-      if (command === "skip") {
+      if (
+        command ===
+        "skip"
+      ) {
         const data =
-          music.get(
+          musicQueues.get(
             message.guild.id
           );
 
         if (
           !data?.current
         ) {
-          await reply(
+          await safeReply(
+            message,
             "❌ Nothing is playing."
           );
-        } else {
-          data.player.stop();
-
-          await reply(
-            "⏭️ Skipped."
-          );
+          return;
         }
+
+        data.player.stop();
+
+        await safeReply(
+          message,
+          "⏭️ Skipped."
+        );
 
         return;
       }
@@ -1652,26 +2234,36 @@ client.on(
       // STOP
       // ======================================================
 
-      if (command === "stop") {
+      if (
+        command ===
+        "stop"
+      ) {
         const data =
-          music.get(
+          musicQueues.get(
             message.guild.id
           );
 
         if (!data) {
-          await reply(
+          await safeReply(
+            message,
             "❌ Nothing is playing."
           );
-        } else {
-          data.queue = [];
-          data.current = null;
-          data.loop = false;
-          data.player.stop();
 
-          await reply(
-            "⏹️ Music stopped and queue cleared."
-          );
+          return;
         }
+
+        data.queue = [];
+        data.current =
+          null;
+        data.loop =
+          false;
+
+        data.player.stop();
+
+        await safeReply(
+          message,
+          "⏹️ Music stopped and queue cleared."
+        );
 
         return;
       }
@@ -1680,16 +2272,20 @@ client.on(
       // LOOP
       // ======================================================
 
-      if (command === "loop") {
+      if (
+        command ===
+        "loop"
+      ) {
         const data =
-          getMusic(
+          getMusicData(
             message.guild.id
           );
 
         data.loop =
           !data.loop;
 
-        await reply(
+        await safeReply(
+          message,
           data.loop
             ? "🔁 Loop is now **ON**."
             : "➡️ Loop is now **OFF**."
@@ -1702,9 +2298,12 @@ client.on(
       // QUEUE
       // ======================================================
 
-      if (command === "queue") {
+      if (
+        command ===
+        "queue"
+      ) {
         const data =
-          music.get(
+          musicQueues.get(
             message.guild.id
           );
 
@@ -1715,29 +2314,45 @@ client.on(
             !data.queue.length
           )
         ) {
-          await reply(
+          await safeReply(
+            message,
             "📭 Queue is empty."
           );
 
           return;
         }
 
-        let text =
+        let text = "";
+
+        if (
           data.current
-            ? `▶️ **Now Playing:** ${data.current.title}\n\n`
-            : "";
+        ) {
+          text +=
+            `▶️ **Now Playing:** ${data.current.title}\n\n`;
+        }
 
-        text +=
+        if (
           data.queue.length
-            ? data.queue
-                .map(
-                  (track, index) =>
-                    `**${index + 1}.** ${track.title}`
-                )
-                .join("\n")
-            : "No songs waiting.";
+        ) {
+          text +=
+            data.queue
+              .map(
+                (
+                  track,
+                  index
+                ) =>
+                  `**${index + 1}.** ${track.title}`
+              )
+              .join(
+                "\n"
+              );
+        } else {
+          text +=
+            "No songs waiting.";
+        }
 
-        await reply(
+        await safeReply(
+          message,
           text.slice(
             0,
             1900
@@ -1756,16 +2371,29 @@ client.on(
 );
 
 // ============================================================
-// BOT AI MENTION
+// AI MENTION
 // ============================================================
 
 client.on(
   "messageCreate",
-  async (message) => {
+  async (
+    message
+  ) => {
     try {
       if (
-        message.author.bot ||
-        message.guildId !== GUILD_ID ||
+        message.author.bot
+      ) {
+        return;
+      }
+
+      if (
+        message.guildId !==
+        GUILD_ID
+      ) {
+        return;
+      }
+
+      if (
         !client.user ||
         !message.mentions.has(
           client.user.id
@@ -1775,9 +2403,9 @@ client.on(
       }
 
       if (
-        message.content
-          .trim()
-          .startsWith(PREFIX)
+        message.content.startsWith(
+          PREFIX
+        )
       ) {
         return;
       }
@@ -1794,20 +2422,18 @@ client.on(
           .trim();
 
       if (!prompt) {
-        await message.reply(
-          noMentions(
-            "Yo, what do you need?"
-          )
+        await safeReply(
+          message,
+          "Yo, what do you need?"
         );
 
         return;
       }
 
       if (!openai) {
-        await message.reply(
-          noMentions(
-            "❌ AI isn't configured. Add OPENAI_API_KEY in Render."
-          )
+        await safeReply(
+          message,
+          "❌ AI isn't configured."
         );
 
         return;
@@ -1836,26 +2462,24 @@ client.on(
         const answer =
           response.output_text?.trim();
 
-        await message.reply(
-          noMentions(
-            answer
-              ? answer.slice(
-                  0,
-                  1900
-                )
-              : "❌ I didn't get a response."
-          )
-        );
+        if (answer) {
+          await safeReply(
+            message,
+            answer.slice(
+              0,
+              1900
+            )
+          );
+        }
       } catch (error) {
         console.error(
           "❌ OpenAI error:",
           error
         );
 
-        await message.reply(
-          noMentions(
-            "❌ AI error. Check OPENAI_API_KEY and OPENAI_MODEL in Render."
-          )
+        await safeReply(
+          message,
+          "❌ AI error. Check your OPENAI_API_KEY and OPENAI_MODEL."
         );
       }
     } catch (error) {
@@ -1868,34 +2492,114 @@ client.on(
 );
 
 // ============================================================
-// STARTUP
+// LEAVE OTHER SERVERS
+// ============================================================
+
+async function leaveOtherGuilds() {
+  console.log(
+    "🔎 Checking guilds..."
+  );
+
+  for (
+    const guild of
+    client.guilds.cache.values()
+  ) {
+    if (
+      guild.id ===
+      GUILD_ID
+    ) {
+      console.log(
+        `✅ Keeping guild: ${guild.name} (${guild.id})`
+      );
+
+      continue;
+    }
+
+    console.log(
+      `🚪 Leaving unauthorized guild: ${guild.name} (${guild.id})`
+    );
+
+    try {
+      await guild.leave();
+
+      console.log(
+        `✅ Left ${guild.name}`
+      );
+    } catch (error) {
+      console.error(
+        `❌ Couldn't leave ${guild.name}:`,
+        error
+      );
+    }
+  }
+}
+
+// ============================================================
+// IF SOMEONE INVITES IT TO ANOTHER SERVER
+// ============================================================
+
+client.on(
+  "guildCreate",
+  async (guild) => {
+    console.log(
+      `📥 Bot joined: ${guild.name} (${guild.id})`
+    );
+
+    if (
+      guild.id !==
+      GUILD_ID
+    ) {
+      console.log(
+        `🚪 ${guild.name} is not Erts United. Leaving...`
+      );
+
+      try {
+        await guild.leave();
+
+        console.log(
+          `✅ Left unauthorized guild.`
+        );
+      } catch (error) {
+        console.error(
+          "❌ Couldn't leave unauthorized guild:",
+          error
+        );
+      }
+
+      return;
+    }
+
+    console.log(
+      "✅ This is the authorized Erts United guild."
+    );
+  }
+);
+
+// ============================================================
+// READY
 // ============================================================
 
 client.once(
   "ready",
   async () => {
     console.log(
-      "===================================="
+      "======================================"
     );
 
     console.log(
-      `🤖 ${client.user.tag}`
+      `🤖 Logged in as ${client.user.tag}`
     );
 
     console.log(
-      `🆔 ${client.user.id}`
+      `🆔 Bot ID: ${client.user.id}`
     );
 
     console.log(
-      `🎯 Guild: ${GUILD_ID}`
+      `🎯 Allowed Guild: ${GUILD_ID}`
     );
 
     console.log(
-      `👤 Hoster role: ${HOSTER_ROLE}`
-    );
-
-    console.log(
-      "🚫 Slash commands disabled"
+      `👤 Hoster Role: ${FRIENDLY_HOSTER_ROLE_ID}`
     );
 
     console.log(
@@ -1903,85 +2607,89 @@ client.once(
     );
 
     console.log(
-      "===================================="
+      "🚫 Slash commands disabled"
     );
 
+    console.log(
+      "======================================"
+    );
+
+    // LEAVE EVERY OTHER SERVER
+    await leaveOtherGuilds();
+
+    // Check Erts United
     try {
       const guild =
         await client.guilds.fetch(
           GUILD_ID
         );
 
-      const botMember =
-        await guild.members.fetch(
-          client.user.id
+      console.log(
+        `✅ Connected to: ${guild.name}`
+      );
+
+      const role =
+        guild.roles.cache.get(
+          FRIENDLY_HOSTER_ROLE_ID
         );
 
-      console.log(
-        `✅ Connected to ${guild.name}`
-      );
-
-      console.log(
-        `✅ Hoster role ${
-          guild.roles.cache.has(
-            HOSTER_ROLE
-          )
-            ? "found"
-            : "NOT FOUND"
-        }`
-      );
-
-      const results =
-        await client.channels.fetch(
-          RESULTS_CHANNEL
+      if (role) {
+        console.log(
+          `✅ Friendly Hoster role found: ${role.name}`
         );
+      } else {
+        console.error(
+          "❌ FRIENDLY HOSTER ROLE NOT FOUND."
+        );
+      }
 
-      console.log(
-        `✅ Results channel ${
-          results
-            ? "found"
-            : "NOT FOUND"
-        }`
-      );
-
-      const vc =
+      const resultChannel =
         await client.channels.fetch(
-          FIXED_VC
+          RESULTS_CHANNEL_ID
         );
 
       if (
-        vc &&
+        resultChannel
+      ) {
+        console.log(
+          "✅ Results channel found."
+        );
+      } else {
+        console.error(
+          "❌ Results channel not found."
+        );
+      }
+    } catch (error) {
+      console.error(
+        "❌ Couldn't access Erts United guild:",
+        error
+      );
+    }
+
+    // AUTO JOIN FIXED VC
+    try {
+      const channel =
+        await client.channels.fetch(
+          FIXED_VC_ID
+        );
+
+      if (
+        channel &&
         (
-          vc.type ===
+          channel.type ===
             ChannelType.GuildVoice ||
-          vc.type ===
+          channel.type ===
             ChannelType.GuildStageVoice
         )
       ) {
-        const permissions =
-          vc.permissionsFor(
-            botMember
-          );
-
-        if (
-          permissions &&
-          !permissions.has(
-            PermissionsBitField.Flags.Connect
-          )
-        ) {
-          console.warn(
-            "⚠️ Missing Connect permission in fixed VC."
-          );
-        }
-
         try {
           const connection =
-            await connectVC(
-              vc
+            await connectToVoice(
+              channel
             );
 
           const data =
-            getMusic(
+            getMusicData(
               GUILD_ID
             );
 
@@ -1993,58 +2701,75 @@ client.once(
           );
 
           console.log(
-            `🔊 Joined ${vc.name}`
+            `🔊 Joined fixed VC: ${channel.name}`
           );
         } catch (error) {
-          console.warn(
-            "⚠️ Auto VC join failed:",
-            error?.message ||
-              error
+          console.log(
+            "⚠️ Couldn't auto-join fixed VC:",
+            error.message
           );
         }
       }
     } catch (error) {
-      console.error(
-        "❌ Target guild check failed:",
-        error?.message ||
-          error
+      console.log(
+        "⚠️ Fixed VC check failed:",
+        error.message
       );
     }
 
     console.log(
-      "✅ PREFIX BOT READY."
+      "======================================"
     );
 
     console.log(
-      "✅ Friendly buttons are active."
+      "✅ erts United Bot is READY"
+    );
+
+    console.log(
+      "✅ ! prefix commands enabled"
+    );
+
+    console.log(
+      "✅ Friendly button system enabled"
+    );
+
+    console.log(
+      "======================================"
     );
   }
 );
 
 // ============================================================
-// CLEANUP
+// CLEANUP EXPIRED DM REQUESTS
 // ============================================================
 
-setInterval(() => {
-  const now =
-    Date.now();
+setInterval(
+  () => {
+    const now =
+      Date.now();
 
-  for (
-    const [
-      userId,
-      request,
-    ] of pendingDMs
-  ) {
-    if (
-      request.expires <=
-      now
+    for (
+      const [
+        userId,
+        data,
+      ] of pendingRobloxDMs
     ) {
-      pendingDMs.delete(
-        userId
-      );
+      if (
+        data.expires <=
+        now
+      ) {
+        pendingRobloxDMs.delete(
+          userId
+        );
+      }
     }
-  }
-}, 60_000).unref();
+  },
+  60_000
+).unref();
+
+// ============================================================
+// ERRORS
+// ============================================================
 
 client.on(
   "error",
@@ -2076,6 +2801,10 @@ process.on(
   }
 );
 
+// ============================================================
+// LOGIN
+// ============================================================
+
 console.log(
   "🚀 Starting erts United Bot..."
 );
@@ -2083,7 +2812,7 @@ console.log(
 client.login(TOKEN).catch(
   (error) => {
     console.error(
-      "❌ Discord login failed:",
+      "❌ Login failed:",
       error
     );
 
