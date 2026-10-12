@@ -23,7 +23,6 @@ import {
 } from "@discordjs/voice";
 
 import play from "play-dl";
-import OpenAI from "openai";
 
 // ============================================================
 // CONFIG
@@ -33,12 +32,6 @@ const TOKEN =
   process.env.TOKEN ||
   process.env.DISCORD_TOKEN;
 
-const OPENAI_API_KEY =
-  process.env.OPENAI_API_KEY || "";
-
-const OPENAI_MODEL =
-  process.env.OPENAI_MODEL ||
-  "gpt-5-mini";
 
 const PREFIX = "!";
 
@@ -119,11 +112,6 @@ const client = new Client({
   ],
 });
 
-const openai = OPENAI_API_KEY
-  ? new OpenAI({
-      apiKey: OPENAI_API_KEY,
-    })
-  : null;
 
 // ============================================================
 // FRIENDLY SYSTEM
@@ -468,7 +456,7 @@ function buildFriendlyMessage(
   }
 
   text +=
-    "\n\nClick your position to claim it. Need added? Click **➕ Need Add**.";
+    "\n\nClick your position to claim it. Need add? Click **➕ Need Add**.";
 
   return text;
 }
@@ -507,7 +495,7 @@ async function createFriendly(
   const message =
     await channel.send({
       content:
-        "@here\n\n" +
+        "@everyone\n\n" +
         buildFriendlyMessage(
           state
         ),
